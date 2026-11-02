@@ -1,0 +1,7 @@
+The Simplified Chinese installer messages are adapted from Inno Setup's
+ChineseSimplified.isl, maintained by Zhenghan Yang (Kira).
+Source: https://github.com/jrsoftware/issrc/blob/main/Files/Languages/ChineseSimplified.isl
+Translation project: https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation
+
+The installer is built with Inno Setup, copyright Jordan Russell and Martijn Laan.
+Inno Setup: https://jrsoftware.org/

@@ -21,7 +21,9 @@ Windows 全局光标覆盖层：
 
 ## 运行
 
-双击exe程序，不需要安装。
+推荐下载 `OsuCursorWin-Setup-版本号-x64.exe`，双击并确认一次管理员授权。安装器内置 .NET 运行时，自动配置开始菜单覆盖权限、安装程序并添加开始菜单快捷方式；可选创建桌面快捷方式。之后启动和开机自启均无需再次授权。更新时直接运行新版本安装器。
+
+便携版 `OsuCursorWin.exe` 可直接运行，需要另行安装 .NET 8 Desktop Runtime，且不具备开始菜单覆盖权限。
 
 或使用源码运行：
 
@@ -29,7 +31,7 @@ Windows 全局光标覆盖层：
 dotnet run --project OsuCursorWin\OsuCursorWin.csproj
 ```
 
-需要 Windows 10/11 和 .NET 8 Desktop Runtime。默认构建不请求管理员权限，可以直接运行。若需要覆盖开始菜单等 Shell 窗口，请使用下面的 UIAccess 构建和安装步骤。
+需要 Windows 10（1607 或更新版本）/11 64 位系统。源码运行和默认便携构建需要 .NET 8 Desktop Runtime，一体化安装包不需要。设置位于当前用户目录，卸载后保留。
 
 首次启动会自动打开设置窗口；之后右键托盘图标选择“设置”可重新打开。修改会实时生效并保存到 `%APPDATA%\OsuCursorWin\settings.json`。最小化或关闭设置窗口只会隐藏到后台，不会退出程序。
 
@@ -54,6 +56,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install-uiaccess.ps1
 
 请以管理员身份运行安装脚本。脚本会停止当前实例、复用有效的本地代码签名证书（不存在时创建并信任）、把 exe 复制到 `C:\Program Files\OsuCursorWin\` 并签名。之后启动 `C:\Program Files\OsuCursorWin\OsuCursorWin.exe`。
 
+一体化安装器会自动处理这些步骤，先验证临时程序的签名再替换现有版本。安装器为当前安装目录创建机器级、不可导出的签名密钥；升级复用证书，卸载移除安装器拥有的证书信任、程序、快捷方式及指向该程序的已加载用户启动项。个人设置和安装前已有的证书不受影响。
+
 程序使用独立线程上的低层鼠标钩子接收移动和点击事件，合批后立即移动原生透明窗口，无需等待动画帧，也不经过 WPF 透明窗口的同步绘制。旋转、缩放和发光使用缓存图片与持久位图缓冲区，通过 Windows 分层窗口提交。独立高精度计时器按光标所在显示器的当前刷新率驱动动画，最多保留一次待执行回调，延迟时跳过过期帧，避免积压后补帧。移动后保留 120ms 的绘制活动，静止且动画结束后停止连续渲染。边缘命中检测由单个后台工作项执行，只保留最新请求，避免其他窗口响应慢时阻塞光标跟随。钩子安装失败时使用轮询。
 
 左右键、中键和两个侧键分别跟踪；输入合批保留按键顺序、按下位置和快速往返拖动，持续高频输入也会给绘制留出执行机会。设置滑块实时生效，停止拖动 250ms 后合并写盘，关闭窗口时立即保存。覆盖层仍经过 Windows 桌面合成，显示延迟不能等同于原生硬件光标。
@@ -73,6 +77,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 构建产物会输出到 `publish\OsuCursorWin.exe`。默认生成 `win-x64` 框架依赖单文件版本，需要安装 .NET 8 Desktop Runtime。
 
 `-UiAccess` 构建输出到 `publish-uiaccess\OsuCursorWin.exe`，须通过安装脚本签名后运行。
+
+构建一体化安装包需要 .NET 8 SDK 和 [Inno Setup 6](https://jrsoftware.org/isdl.php)。安装 Inno Setup 后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1 -Version 1.1.0
+```
+
+产物为 `artifacts\OsuCursorWin-Setup-1.1.0-x64.exe`，可作为一个文件发布。自定义编译器路径可加 `-InnoSetupCompiler "C:\工具\Inno Setup 6\ISCC.exe"`。安装器语言资源来源见 `installer\NOTICE.txt`，构建工具、本机证书和私钥均不打包。
 
 如果开始菜单遮挡光标，请运行 `C:\Program Files\OsuCursorWin\OsuCursorWin.exe`，而不是 `publish` 下的便携版。设置窗口会显示是否已启用开始菜单覆盖。安装版可通过以下命令检查 Windows 是否实际授予 UIAccess，无需退出运行中的实例：
 

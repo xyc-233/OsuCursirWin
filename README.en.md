@@ -21,7 +21,9 @@ Windows global cursor overlay:
 
 ## Run
 
-No installation needed—just double-click the EXE to run.
+Download `OsuCursorWin-Setup-version-x64.exe`, run it, and approve the administrator prompt. The installer includes the .NET runtime, configures Start menu coverage, installs the application, and creates a Start menu shortcut, with an optional desktop shortcut. Normal launches and login startup do not require elevation. Run a newer installer to upgrade.
+
+The portable `OsuCursorWin.exe` runs directly but requires .NET 8 Desktop Runtime and does not provide Start menu coverage.
 
 Or run from source:
 
@@ -29,7 +31,7 @@ Or run from source:
 dotnet run --project OsuCursorWin\OsuCursorWin.csproj
 ```
 
-Requirements: Windows 10/11 and .NET 8 Desktop Runtime. The default build runs without administrator privileges. To overlay shell windows such as the Start menu, use the optional UIAccess build and installation steps below.
+Requirements: Windows 10 version 1607 or newer, or Windows 11, on x64. Source runs and default portable builds require .NET 8 Desktop Runtime; the integrated installer includes it. User settings are retained after uninstall.
 
 The settings window opens automatically on first launch and can be reopened from the tray menu. Changes take effect immediately and are saved to `%APPDATA%\OsuCursorWin\settings.json`. Minimizing or closing the settings window only hides it to the background instead of exiting the program.
 
@@ -54,6 +56,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install-uiaccess.ps1
 
 Run the installation script as administrator. It stops the current instance, reuses a valid local code-signing certificate (creating and trusting one if needed), copies the exe to `C:\Program Files\OsuCursorWin\`, and signs it. After that, launch `C:\Program Files\OsuCursorWin\OsuCursorWin.exe`.
 
+The integrated installer handles these steps automatically and verifies the staged signature before replacing an existing installation. It uses a machine-level, non-exportable signing key associated with the installation directory. Upgrades reuse the certificate; uninstall removes installer-owned trust entries, application files, shortcuts, and matching startup entries in loaded user profiles. Personal settings and pre-existing certificates are retained.
+
 The program receives low-level mouse events on a dedicated thread and moves the native transparent window immediately after processing each batch, without waiting for animation or WPF transparent-window synchronization. Cached images and a persistent bitmap buffer provide rotation, scale, and glow through Windows layered-window updates. A dedicated high-resolution timer follows the current monitor refresh rate, keeps at most one pending callback, and skips expired frames instead of building a backlog. Rendering stays active for 120ms after movement before stopping once animation settles. A single background worker performs edge hit testing and retains only the latest request, so a slow target window does not block cursor movement. Polling is used if hook installation fails.
 
 All five mouse buttons are tracked independently. Input batching preserves button order, press locations, and quick out-and-back drags, while sustained input yields to rendering. Slider changes apply immediately and are saved together after 250ms of inactivity, or when the settings window closes. The overlay still passes through Windows desktop composition and cannot guarantee the latency of the native hardware cursor.
@@ -73,6 +77,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 The build outputs `publish\OsuCursorWin.exe`. It is a `win-x64` framework-dependent single-file build and requires .NET 8 Desktop Runtime.
 
 The `-UiAccess` build outputs `publish-uiaccess\OsuCursorWin.exe` and must be signed through the installation script before running.
+
+Building the integrated installer requires .NET 8 SDK and [Inno Setup 6](https://jrsoftware.org/isdl.php):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1 -Version 1.1.0
+```
+
+Distribute `artifacts\OsuCursorWin-Setup-1.1.0-x64.exe` as a single file. Use `-InnoSetupCompiler "C:\Tools\Inno Setup 6\ISCC.exe"` for a custom compiler location. Language resource attribution is in `installer\NOTICE.txt`. Build tools and local certificates or private keys are excluded from the installer.
 
 If the Start menu covers the cursor, run `C:\Program Files\OsuCursorWin\OsuCursorWin.exe` instead of the portable executable under `publish`. Settings show whether Start menu coverage is enabled. Verify the actual Windows UIAccess permission without exiting the running instance with:
 
