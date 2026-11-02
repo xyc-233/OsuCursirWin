@@ -18,10 +18,8 @@ internal static class ProgramIcon
     {
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(ResourceName)
             ?? throw new InvalidOperationException($"Missing embedded resource: {ResourceName}");
-        using var buffer = new MemoryStream();
-        stream.CopyTo(buffer);
-        buffer.Position = 0;
-        return new Icon(buffer);
+        using var icon = new Icon(stream);
+        return (Icon)icon.Clone();
     }
 
     internal static ImageSource CreateWindowIcon()

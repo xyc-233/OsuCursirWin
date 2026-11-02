@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../OsuCursorWin/MouseInputBuffer.cs" Link="MouseInputBuffer.cs" />
+    <Compile Include="../../OsuCursorWin/MouseInputSource.cs" Link="MouseInputSource.cs" />
+    <Compile Include="../../OsuCursorWin/NativeMethods.cs" Link="NativeMethods.cs" />
+    <Compile Include="../../OsuCursorWin/CursorModel.cs" Link="CursorModel.cs" />
+    <Compile Include="../../OsuCursorWin/MouseButtonState.cs" Link="MouseButtonState.cs" />
+    <Compile Include="../../OsuCursorWin/ResizeDirection.cs" Link="ResizeDirection.cs" />
+  </ItemGroup>
+</Project>

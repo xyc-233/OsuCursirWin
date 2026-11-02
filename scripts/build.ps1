@@ -1,9 +1,12 @@
+param([switch]$UiAccess)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root "OsuCursorWin\OsuCursorWin.csproj"
-$output = Join-Path $root "publish"
-$outputV2 = Join-Path $root "publish-v2"
+$outputName = if ($UiAccess) { "publish-uiaccess" } else { "publish" }
+$output = Join-Path $root $outputName
+$outputV2 = Join-Path $root "$outputName-v2"
 
 $publishExe = Join-Path $output "OsuCursorWin.exe"
 $locked = $false
@@ -26,7 +29,7 @@ if (Test-Path -LiteralPath $publishExe)
 
 if ($locked)
 {
-    Write-Host "publish\OsuCursorWin.exe is in use; building to publish-v2 instead."
+    Write-Host "$publishExe is in use; building to $outputV2 instead."
     $output = $outputV2
 }
 
@@ -35,6 +38,12 @@ dotnet publish $project -c Release -r win-x64 --self-contained false `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:DebugType=None `
     -p:DebugSymbols=false `
+    -p:UseUiAccess=$($UiAccess.IsPresent.ToString().ToLowerInvariant()) `
     -o $output
+
+if ($LASTEXITCODE -ne 0)
+{
+    throw "dotnet publish failed with exit code $LASTEXITCODE."
+}
 
 Write-Host "Built: $output\OsuCursorWin.exe"

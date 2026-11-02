@@ -1,30 +1,24 @@
 using System;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 
 using Button = System.Windows.Controls.Button;
-using Brush = System.Windows.Media.Brush;
-using Brushes = System.Windows.Media.Brushes;
-using CheckBox = OsuCursorWin.OsuCheckbox;
-using Color = System.Windows.Media.Color;
-using FontFamily = System.Windows.Media.FontFamily;
+using CheckBox = System.Windows.Controls.CheckBox;
+using ComboBox = System.Windows.Controls.ComboBox;
+using GroupBox = System.Windows.Controls.GroupBox;
 using HorizontalAlignment = System.Windows.HorizontalAlignment;
-using Point = System.Windows.Point;
+using Label = System.Windows.Controls.Label;
+using SystemColors = System.Windows.SystemColors;
+using SystemFonts = System.Windows.SystemFonts;
 
 namespace OsuCursorWin;
 
 internal sealed class SettingsWindow : Window
 {
-    private static readonly Brush BackgroundBrush = new SolidColorBrush(Color.FromRgb(18, 19, 24));
-    private static readonly Brush PanelBrush = new SolidColorBrush(Color.FromRgb(30, 31, 38));
-    private static readonly Brush AccentBrush = new SolidColorBrush(Color.FromRgb(255, 102, 171));
-    private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(238, 239, 244));
-    private static readonly Brush MutedBrush = new SolidColorBrush(Color.FromRgb(158, 160, 172));
-
     private readonly AppSettings _settings;
     private readonly Slider _sizeSlider;
     private readonly TextBlock _sizeValueText;
@@ -36,6 +30,12 @@ internal sealed class SettingsWindow : Window
     private readonly TextBlock _tapSoundVolumeText;
     private readonly Slider _hoverSoundVolumeSlider;
     private readonly TextBlock _hoverSoundVolumeText;
+    private readonly Grid _tapSoundVolumeRow;
+    private readonly Grid _hoverSoundVolumeRow;
+    private readonly CheckBox _hideWhenCursorHiddenCheckBox;
+    private readonly ComboBox _animationFrameRateComboBox;
+    private readonly ComboBox _renderQualityComboBox;
+    private readonly CheckBox _pauseRenderingWhenIdleCheckBox;
     private bool _allowClose;
     private bool _autoStartUpdating;
     private bool _tapSoundUpdating;
@@ -49,208 +49,207 @@ internal sealed class SettingsWindow : Window
     internal event Action<bool>? HoverSoundChanged;
     internal event Action<double>? HoverSoundVolumeChanged;
     internal event Action<bool>? ResizeSoundModeChanged;
+    internal event Action<bool>? HideWhenCursorHiddenChanged;
+    internal event Action<int>? AnimationFrameRateLimitChanged;
+    internal event Action<bool>? HighQualityRenderingChanged;
+    internal event Action<bool>? PauseRenderingWhenIdleChanged;
 
     internal SettingsWindow(AppSettings settings)
     {
         _settings = settings;
-
         Title = "osu! Cursor 设置";
-        Width = 420;
+        Width = 480;
         SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         ResizeMode = ResizeMode.CanMinimize;
         ShowInTaskbar = true;
         Icon = ProgramIcon.CreateWindowIcon();
-        Background = BackgroundBrush;
-        Foreground = TextBrush;
-        FontFamily = new FontFamily("Microsoft YaHei UI");
         UseLayoutRounding = true;
+        SetResourceReference(BackgroundProperty, SystemColors.ControlBrushKey);
+        SetResourceReference(ForegroundProperty, SystemColors.ControlTextBrushKey);
+        SetResourceReference(FontFamilyProperty, SystemFonts.MessageFontFamilyKey);
+        SetResourceReference(FontSizeProperty, SystemFonts.MessageFontSizeKey);
+        SetResourceReference(FontWeightProperty, SystemFonts.MessageFontWeightKey);
+        UpdateWindowBounds();
 
-        var root = new StackPanel
+        var root = new Grid();
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var sections = new StackPanel { Margin = new Thickness(16, 12, 16, 4) };
+        var scrollViewer = new ScrollViewer
         {
-            Margin = new Thickness(20)
+            Content = sections,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Focusable = false
         };
+        root.Children.Add(scrollViewer);
 
-        root.Children.Add(new TextBlock
-        {
-            Text = "设置",
-            FontSize = 24,
-            FontWeight = FontWeights.Bold,
-            Foreground = AccentBrush,
-            Margin = new Thickness(0, 0, 0, 18)
-        });
-
+        _sizeSlider = CreateSlider(settings.CursorWidth, 16, 64, "光标大小，16 至 64 像素", 0);
+        _sizeValueText = CreateValueText($"{_sizeSlider.Value:0} px");
         var cursorSection = new StackPanel();
-        _sizeValueText = new TextBlock
-        {
-            Text = $"{settings.CursorWidth:0} px",
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Foreground = TextBrush,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        var cursorValuePanel = new DockPanel
-        {
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        DockPanel.SetDock(_sizeValueText, Dock.Right);
-        cursorValuePanel.Children.Add(_sizeValueText);
-        cursorValuePanel.Children.Add(new TextBlock
-        {
-            Text = "16 - 64",
-            Foreground = MutedBrush,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-
-        _sizeSlider = new Slider
-        {
-            Minimum = 16,
-            Maximum = 64,
-            TickFrequency = 1,
-            IsSnapToTickEnabled = true,
-            Value = settings.CursorWidth
-        };
-        StyleSlider(_sizeSlider);
-        _sizeSlider.ValueChanged += OnSizeSliderChanged;
-
+        cursorSection.Children.Add(CreateSliderRow("大小(_S):", _sizeSlider, _sizeValueText));
         var resetButton = new Button
         {
-            Content = "恢复默认",
-            Width = 96,
+            Content = "恢复默认(_R)",
             HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(0, 12, 0, 0),
-            Background = AccentBrush,
-            Foreground = Brushes.White,
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(12, 6, 12, 6)
+            Margin = new Thickness(0, 8, 0, 0),
+            Padding = new Thickness(12, 4, 12, 4),
+            MinHeight = 28,
+            TabIndex = 1,
+            ToolTip = "仅将光标大小恢复为 30 px"
         };
+        AutomationProperties.SetName(resetButton, "恢复默认光标大小，30 像素");
         resetButton.Click += (_, _) => _sizeSlider.Value = 30;
-        AttachElasticButton(resetButton);
-
-        cursorSection.Children.Add(cursorValuePanel);
-        cursorSection.Children.Add(_sizeSlider);
         cursorSection.Children.Add(resetButton);
-        root.Children.Add(CreateSection("光标", cursorSection));
+        _hideWhenCursorHiddenCheckBox = CreateCheckBox(
+            "跟随系统光标自动隐藏(_G)", "跟随系统光标自动隐藏", settings.HideWhenCursorHidden, 2);
+        _hideWhenCursorHiddenCheckBox.Margin = new Thickness(0, 12, 0, 0);
+        cursorSection.Children.Add(_hideWhenCursorHiddenCheckBox);
+        cursorSection.Children.Add(new TextBlock
+        {
+            Text = "游戏隐藏系统光标时自动隐藏，恢复后重新显示。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(18, 4, 0, 0)
+        });
+        sections.Children.Add(CreateSection("光标", cursorSection));
 
+        _tapSoundCheckBox = CreateCheckBox("播放敲击音效(_T)", "播放敲击音效", settings.TapSoundEnabled, 3);
+        _tapSoundVolumeSlider = CreateSlider(settings.TapSoundVolume * 100, 0, 100, "敲击音量，百分比", 4);
+        _tapSoundVolumeText = CreateValueText($"{_tapSoundVolumeSlider.Value:0}%");
+        _tapSoundVolumeRow = CreateSliderRow("敲击音量(_V):", _tapSoundVolumeSlider, _tapSoundVolumeText);
+        _tapSoundVolumeRow.Margin = new Thickness(18, 4, 0, 12);
+
+        _hoverSoundCheckBox = CreateCheckBox("播放悬停音效(_H)", "播放悬停音效", settings.HoverSoundEnabled, 5);
+        _hoverSoundVolumeSlider = CreateSlider(settings.HoverSoundVolume * 100, 0, 100, "悬停音量，百分比", 6);
+        _hoverSoundVolumeText = CreateValueText($"{_hoverSoundVolumeSlider.Value:0}%");
+        _hoverSoundVolumeRow = CreateSliderRow("悬停音量(_U):", _hoverSoundVolumeSlider, _hoverSoundVolumeText);
+        _hoverSoundVolumeRow.Margin = new Thickness(18, 4, 0, 0);
+        _resizeSoundCheckBox = CreateCheckBox("仅在调整窗口大小时播放(_W)", "仅在调整窗口大小时播放悬停音效", settings.HoverSoundAsResizePrompt, 7);
+        _resizeSoundCheckBox.Margin = new Thickness(18, 8, 0, 0);
         var soundSection = new StackPanel();
-
-        _tapSoundCheckBox = new CheckBox
-        {
-            Content = "敲击音效",
-            IsChecked = settings.TapSoundEnabled,
-            Foreground = TextBrush,
-            FontSize = 13,
-            Margin = new Thickness(0, 2, 0, 4)
-        };
-        _tapSoundCheckBox.Checked += OnTapSoundChecked;
-        _tapSoundCheckBox.Unchecked += OnTapSoundChecked;
-
-        _tapSoundVolumeText = new TextBlock
-        {
-            Text = $"{Math.Round(settings.TapSoundVolume * 100):0}%",
-            Foreground = TextBrush,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        _tapSoundVolumeSlider = new Slider
-        {
-            Minimum = 0,
-            Maximum = 100,
-            TickFrequency = 1,
-            IsSnapToTickEnabled = true,
-            Value = Math.Clamp(settings.TapSoundVolume * 100, 0, 100),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        StyleSlider(_tapSoundVolumeSlider);
-        _tapSoundVolumeSlider.ValueChanged += OnTapSoundVolumeChanged;
-
-        _hoverSoundCheckBox = new CheckBox
-        {
-            Content = "悬停音效",
-            IsChecked = settings.HoverSoundEnabled,
-            Foreground = TextBrush,
-            FontSize = 13,
-            Margin = new Thickness(0, 10, 0, 4)
-        };
-        _hoverSoundCheckBox.Checked += OnHoverSoundChecked;
-        _hoverSoundCheckBox.Unchecked += OnHoverSoundChecked;
-
-        _hoverSoundVolumeText = new TextBlock
-        {
-            Text = $"{Math.Round(settings.HoverSoundVolume * 100):0}%",
-            Foreground = TextBrush,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        _hoverSoundVolumeSlider = new Slider
-        {
-            Minimum = 0,
-            Maximum = 100,
-            TickFrequency = 1,
-            IsSnapToTickEnabled = true,
-            Value = Math.Clamp(settings.HoverSoundVolume * 100, 0, 100),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        StyleSlider(_hoverSoundVolumeSlider);
-        _hoverSoundVolumeSlider.ValueChanged += OnHoverSoundVolumeChanged;
-
-        _resizeSoundCheckBox = new CheckBox
-        {
-            Content = "窗口拉伸时播放",
-            IsChecked = settings.HoverSoundAsResizePrompt,
-            Foreground = TextBrush,
-            FontSize = 13,
-            Margin = new Thickness(0, 10, 0, 0)
-        };
-        _resizeSoundCheckBox.Checked += OnResizeSoundModeChecked;
-        _resizeSoundCheckBox.Unchecked += OnResizeSoundModeChecked;
-
         soundSection.Children.Add(_tapSoundCheckBox);
-        soundSection.Children.Add(CreateSliderRow("音量", _tapSoundVolumeSlider, _tapSoundVolumeText));
+        soundSection.Children.Add(_tapSoundVolumeRow);
         soundSection.Children.Add(_hoverSoundCheckBox);
-        soundSection.Children.Add(CreateSliderRow("悬停音量", _hoverSoundVolumeSlider, _hoverSoundVolumeText));
+        soundSection.Children.Add(_hoverSoundVolumeRow);
         soundSection.Children.Add(_resizeSoundCheckBox);
-        root.Children.Add(CreateSection("音效", soundSection));
+        sections.Children.Add(CreateSection("音效", soundSection));
 
-        var systemSection = new StackPanel();
-        _autoStartCheckBox = new CheckBox
+        var performanceSection = new StackPanel();
+        _animationFrameRateComboBox = CreateComboBox("动画帧率上限", 8);
+        ComboBoxItem? selectedFrameRate = null;
+        foreach (var limit in new[] { 0, 30, 60, 90, 120, 144, 165, 240, 360, 480 })
         {
-            Content = "开机自启",
-            IsChecked = settings.AutoStart,
-            Foreground = TextBrush,
-            FontSize = 13
-        };
-        _autoStartCheckBox.Checked += OnAutoStartChecked;
-        _autoStartCheckBox.Unchecked += OnAutoStartChecked;
-        systemSection.Children.Add(_autoStartCheckBox);
-        root.Children.Add(CreateSection("系统", systemSection));
+            var item = CreateFrameRateItem(limit);
+            _animationFrameRateComboBox.Items.Add(item);
+            if (limit == settings.AnimationFrameRateLimit)
+            {
+                selectedFrameRate = item;
+            }
+        }
+        if (selectedFrameRate is null)
+        {
+            selectedFrameRate = CreateFrameRateItem(settings.AnimationFrameRateLimit);
+            _animationFrameRateComboBox.Items.Add(selectedFrameRate);
+        }
+        _animationFrameRateComboBox.SelectedItem = selectedFrameRate;
+        performanceSection.Children.Add(CreateComboBoxRow("动画帧率(_F):", _animationFrameRateComboBox));
+        performanceSection.Children.Add(new TextBlock
+        {
+            Text = "默认跟随显示器。降低帧率可减少资源占用，鼠标移动仍即时跟随。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 12)
+        });
+        _renderQualityComboBox = CreateComboBox("渲染质量", 9);
+        _renderQualityComboBox.Items.Add("高质量（默认）");
+        _renderQualityComboBox.Items.Add("性能优先");
+        _renderQualityComboBox.SelectedIndex = settings.HighQualityRendering ? 0 : 1;
+        performanceSection.Children.Add(CreateComboBoxRow("渲染质量(_Q):", _renderQualityComboBox));
+        performanceSection.Children.Add(new TextBlock
+        {
+            Text = "高质量使边缘更平滑，性能优先可减少旋转时的绘制开销。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 12)
+        });
+        _pauseRenderingWhenIdleCheckBox = CreateCheckBox("静止时暂停连续绘制(_P)",
+            "静止时暂停连续绘制", settings.PauseRenderingWhenIdle, 10);
+        performanceSection.Children.Add(_pauseRenderingWhenIdleCheckBox);
+        performanceSection.Children.Add(new TextBlock
+        {
+            Text = "动画结束后降低空闲占用，移动或点击时自动恢复。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(18, 4, 0, 0)
+        });
+        sections.Children.Add(CreateSection("性能", performanceSection));
 
+        _autoStartCheckBox = CreateCheckBox("登录 Windows 时自动启动(_A)", "登录 Windows 时自动启动", settings.AutoStart, 11);
+        var systemSection = new StackPanel();
+        systemSection.Children.Add(_autoStartCheckBox);
+        var status = new TextBlock
+        {
+            Text = UiAccessStatus.IsEnabled
+                ? "开始菜单覆盖：已启用"
+                : "开始菜单覆盖：未启用，请使用安装版。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 8, 0, 0)
+        };
+        AutomationProperties.SetName(status, status.Text);
+        systemSection.Children.Add(status);
+        sections.Children.Add(CreateSection("启动和状态", systemSection));
+
+        var footer = new DockPanel();
+        var closeButton = new Button
+        {
+            Content = "关闭(_C)",
+            IsCancel = true,
+            MinWidth = 88,
+            MinHeight = 28,
+            Padding = new Thickness(16, 4, 16, 4),
+            Margin = new Thickness(12, 0, 0, 0),
+            TabIndex = 12
+        };
+        AutomationProperties.SetName(closeButton, "关闭设置");
+        closeButton.Click += (_, _) => Close();
+        DockPanel.SetDock(closeButton, Dock.Right);
+        footer.Children.Add(closeButton);
+        footer.Children.Add(new TextBlock
+        {
+            Text = "设置自动保存",
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
+        });
+        var footerBorder = new Border
+        {
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(16, 10, 16, 12),
+            Child = footer
+        };
+        footerBorder.SetResourceReference(Border.BorderBrushProperty, SystemColors.ControlDarkBrushKey);
+        Grid.SetRow(footerBorder, 1);
+        root.Children.Add(footerBorder);
         Content = root;
 
-        Opacity = 0;
-        var entranceTransform = new TranslateTransform(0, 24);
-        root.RenderTransform = entranceTransform;
-        Loaded += (_, _) =>
-        {
-            BeginAnimation(
-                OpacityProperty,
-                new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(280))
-                {
-                    EasingFunction = new QuinticEase { EasingMode = EasingMode.EaseOut }
-                });
-
-            entranceTransform.BeginAnimation(
-                TranslateTransform.YProperty,
-                new DoubleAnimation(24, 0, TimeSpan.FromMilliseconds(380))
-                {
-                    EasingFunction = new BackEase
-                    {
-                        EasingMode = EasingMode.EaseOut,
-                        Amplitude = 0.25
-                    }
-                });
-        };
-
+        UpdateSoundControls();
+        _sizeSlider.ValueChanged += OnSizeSliderChanged;
+        _tapSoundVolumeSlider.ValueChanged += OnTapSoundVolumeChanged;
+        _hoverSoundVolumeSlider.ValueChanged += OnHoverSoundVolumeChanged;
+        _autoStartCheckBox.Checked += OnAutoStartChecked;
+        _autoStartCheckBox.Unchecked += OnAutoStartChecked;
+        _tapSoundCheckBox.Checked += OnTapSoundChecked;
+        _tapSoundCheckBox.Unchecked += OnTapSoundChecked;
+        _hoverSoundCheckBox.Checked += OnHoverSoundChecked;
+        _hoverSoundCheckBox.Unchecked += OnHoverSoundChecked;
+        _resizeSoundCheckBox.Checked += OnResizeSoundModeChecked;
+        _resizeSoundCheckBox.Unchecked += OnResizeSoundModeChecked;
+        _hideWhenCursorHiddenCheckBox.Checked += OnHideWhenCursorHiddenChecked;
+        _hideWhenCursorHiddenCheckBox.Unchecked += OnHideWhenCursorHiddenChecked;
+        _animationFrameRateComboBox.SelectionChanged += OnAnimationFrameRateChanged;
+        _renderQualityComboBox.SelectionChanged += OnRenderQualityChanged;
+        _pauseRenderingWhenIdleCheckBox.Checked += OnPauseRenderingWhenIdleChecked;
+        _pauseRenderingWhenIdleCheckBox.Unchecked += OnPauseRenderingWhenIdleChecked;
+        SourceInitialized += (_, _) => UpdateWindowBounds();
+        DpiChanged += (_, _) => UpdateWindowBounds();
+        LocationChanged += (_, _) => UpdateWindowBounds();
         StateChanged += OnStateChanged;
         Closing += OnClosing;
     }
@@ -261,61 +260,46 @@ internal sealed class SettingsWindow : Window
         Close();
     }
 
-    internal void SetAutoStartChecked(bool enabled)
-    {
-        _autoStartUpdating = true;
-        _autoStartCheckBox.IsChecked = enabled;
-        _autoStartUpdating = false;
-    }
+    internal void SetAutoStartChecked(bool enabled) =>
+        SetChecked(_autoStartCheckBox, enabled, ref _autoStartUpdating);
 
     internal void SetTapSoundChecked(bool enabled)
     {
-        _tapSoundUpdating = true;
-        _tapSoundCheckBox.IsChecked = enabled;
-        _tapSoundUpdating = false;
+        SetChecked(_tapSoundCheckBox, enabled, ref _tapSoundUpdating);
+        UpdateSoundControls();
     }
 
     internal void SetHoverSoundChecked(bool enabled)
     {
-        _hoverSoundUpdating = true;
-        _hoverSoundCheckBox.IsChecked = enabled;
-        _hoverSoundUpdating = false;
+        SetChecked(_hoverSoundCheckBox, enabled, ref _hoverSoundUpdating);
+        UpdateSoundControls();
     }
 
-    internal void SetResizeSoundModeChecked(bool enabled)
-    {
-        _resizeSoundUpdating = true;
-        _resizeSoundCheckBox.IsChecked = enabled;
-        _resizeSoundUpdating = false;
-    }
+    internal void SetResizeSoundModeChecked(bool enabled) =>
+        SetChecked(_resizeSoundCheckBox, enabled, ref _resizeSoundUpdating);
 
     private void OnSizeSliderChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         var width = Math.Round(e.NewValue);
-        _settings.CursorWidth = width;
         _sizeValueText.Text = $"{width:0} px";
-        _settings.Save();
         CursorSizeChanged?.Invoke(width);
     }
 
     private void OnAutoStartChecked(object? sender, RoutedEventArgs e)
     {
-        if (_autoStartUpdating)
+        if (!_autoStartUpdating)
         {
-            return;
+            AutoStartChanged?.Invoke(_autoStartCheckBox.IsChecked == true);
         }
-
-        AutoStartChanged?.Invoke(_autoStartCheckBox.IsChecked == true);
     }
 
     private void OnTapSoundChecked(object? sender, RoutedEventArgs e)
     {
-        if (_tapSoundUpdating)
+        UpdateSoundControls();
+        if (!_tapSoundUpdating)
         {
-            return;
+            TapSoundChanged?.Invoke(_tapSoundCheckBox.IsChecked == true);
         }
-
-        TapSoundChanged?.Invoke(_tapSoundCheckBox.IsChecked == true);
     }
 
     private void OnTapSoundVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -327,12 +311,11 @@ internal sealed class SettingsWindow : Window
 
     private void OnHoverSoundChecked(object? sender, RoutedEventArgs e)
     {
-        if (_hoverSoundUpdating)
+        UpdateSoundControls();
+        if (!_hoverSoundUpdating)
         {
-            return;
+            HoverSoundChanged?.Invoke(_hoverSoundCheckBox.IsChecked == true);
         }
-
-        HoverSoundChanged?.Invoke(_hoverSoundCheckBox.IsChecked == true);
     }
 
     private void OnHoverSoundVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -344,18 +327,39 @@ internal sealed class SettingsWindow : Window
 
     private void OnResizeSoundModeChecked(object? sender, RoutedEventArgs e)
     {
-        if (_resizeSoundUpdating)
+        if (!_resizeSoundUpdating)
         {
-            return;
+            ResizeSoundModeChanged?.Invoke(_resizeSoundCheckBox.IsChecked == true);
         }
-
-        ResizeSoundModeChanged?.Invoke(_resizeSoundCheckBox.IsChecked == true);
     }
+
+    private void OnHideWhenCursorHiddenChecked(object? sender, RoutedEventArgs e) =>
+        HideWhenCursorHiddenChanged?.Invoke(_hideWhenCursorHiddenCheckBox.IsChecked == true);
+
+    private void OnAnimationFrameRateChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_animationFrameRateComboBox.SelectedItem is ComboBoxItem { Tag: int limit })
+        {
+            AnimationFrameRateLimitChanged?.Invoke(limit);
+        }
+    }
+
+    private void OnRenderQualityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_renderQualityComboBox.SelectedIndex >= 0)
+        {
+            HighQualityRenderingChanged?.Invoke(_renderQualityComboBox.SelectedIndex == 0);
+        }
+    }
+
+    private void OnPauseRenderingWhenIdleChecked(object? sender, RoutedEventArgs e) =>
+        PauseRenderingWhenIdleChanged?.Invoke(_pauseRenderingWhenIdleCheckBox.IsChecked == true);
 
     private void OnStateChanged(object? sender, EventArgs e)
     {
         if (WindowState == WindowState.Minimized)
         {
+            _settings.FlushPendingSave();
             WindowState = WindowState.Normal;
             Hide();
         }
@@ -363,6 +367,7 @@ internal sealed class SettingsWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        _settings.FlushPendingSave();
         if (!_allowClose)
         {
             e.Cancel = true;
@@ -370,91 +375,160 @@ internal sealed class SettingsWindow : Window
         }
     }
 
-    private static Border CreateSection(string title, params UIElement[] children)
+    private void UpdateSoundControls()
     {
-        var stack = new StackPanel();
-        stack.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = AccentBrush,
-            Margin = new Thickness(0, 0, 0, 10)
-        });
+        _tapSoundVolumeRow.IsEnabled = _tapSoundCheckBox.IsChecked == true;
+        _hoverSoundVolumeRow.IsEnabled = _hoverSoundCheckBox.IsChecked == true;
+        _resizeSoundCheckBox.IsEnabled = _hoverSoundCheckBox.IsChecked == true;
+    }
 
-        foreach (var child in children)
+    private void UpdateWindowBounds()
+    {
+        var width = SystemParameters.WorkArea.Width;
+        var height = SystemParameters.WorkArea.Height;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
         {
-            stack.Children.Add(child);
+            var screen = System.Windows.Forms.Screen.FromHandle(handle);
+            var dpi = VisualTreeHelper.GetDpi(this);
+            width = screen.WorkingArea.Width / dpi.DpiScaleX;
+            height = screen.WorkingArea.Height / dpi.DpiScaleY;
         }
 
-        return new Border
-        {
-            Background = PanelBrush,
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(14),
-            Margin = new Thickness(0, 0, 0, 12),
-            Child = stack
-        };
+        MaxWidth = Math.Max(1, width);
+        MaxHeight = Math.Max(1, height);
     }
 
-    private static DockPanel CreateSliderRow(string label, Slider slider, TextBlock valueText)
+    private static void SetChecked(CheckBox checkBox, bool enabled, ref bool updating)
     {
-        var panel = new DockPanel
+        updating = true;
+        try
         {
-            Margin = new Thickness(0, 6, 0, 0)
+            checkBox.IsChecked = enabled;
+        }
+        finally
+        {
+            updating = false;
+        }
+    }
+
+    private static GroupBox CreateSection(string title, UIElement content) => new()
+    {
+        Header = title,
+        Content = content,
+        Padding = new Thickness(12, 8, 12, 12),
+        Margin = new Thickness(0, 0, 0, 12)
+    };
+
+    private static CheckBox CreateCheckBox(string content, string name, bool value, int tabIndex)
+    {
+        var checkBox = new CheckBox
+        {
+            Content = content,
+            IsChecked = value,
+            TabIndex = tabIndex,
+            VerticalContentAlignment = VerticalAlignment.Center
         };
+        AutomationProperties.SetName(checkBox, name);
+        return checkBox;
+    }
 
-        valueText.VerticalAlignment = VerticalAlignment.Center;
-        DockPanel.SetDock(valueText, Dock.Right);
-
-        var labelText = new TextBlock
+    private static Slider CreateSlider(double value, double minimum, double maximum, string name, int tabIndex)
+    {
+        var slider = new Slider
         {
-            Text = label,
-            Foreground = MutedBrush,
+            Minimum = minimum,
+            Maximum = maximum,
+            Value = double.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : minimum,
+            TickFrequency = 1,
+            SmallChange = 1,
+            LargeChange = maximum == 100 ? 10 : 5,
+            IsSnapToTickEnabled = true,
+            IsMoveToPointEnabled = true,
+            MinHeight = 24,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 10, 0)
+            TabIndex = tabIndex
         };
-        DockPanel.SetDock(labelText, Dock.Left);
-
-        slider.VerticalAlignment = VerticalAlignment.Center;
-
-        panel.Children.Add(valueText);
-        panel.Children.Add(labelText);
-        panel.Children.Add(slider);
-        return panel;
+        AutomationProperties.SetName(slider, name);
+        return slider;
     }
 
-    private static void StyleSlider(Slider slider)
+    private static ComboBox CreateComboBox(string name, int tabIndex)
     {
-        slider.Foreground = AccentBrush;
-        slider.MinHeight = 24;
-        slider.Margin = new Thickness(0, 4, 0, 0);
-    }
-
-    private static void AttachElasticButton(Button button)
-    {
-        var scale = new ScaleTransform(1, 1);
-        button.RenderTransform = scale;
-        button.RenderTransformOrigin = new Point(0.5, 0.5);
-
-        button.MouseEnter += (_, _) =>
-            AnimateScale(scale, 1.04, 120, new QuinticEase { EasingMode = EasingMode.EaseOut });
-        button.MouseLeave += (_, _) =>
-            AnimateScale(scale, 1.0, 180, new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.2 });
-        button.PreviewMouseLeftButtonDown += (_, _) =>
-            AnimateScale(scale, 0.96, 90, new QuinticEase { EasingMode = EasingMode.EaseOut });
-        button.PreviewMouseLeftButtonUp += (_, _) =>
-            AnimateScale(scale, 1.0, 160, new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.3 });
-    }
-
-    private static void AnimateScale(ScaleTransform transform, double to, int milliseconds, IEasingFunction? easing)
-    {
-        var animation = new DoubleAnimation(to, TimeSpan.FromMilliseconds(milliseconds))
+        var comboBox = new ComboBox
         {
-            EasingFunction = easing
+            MinHeight = 28,
+            Padding = new Thickness(6, 2, 6, 2),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            TabIndex = tabIndex
         };
+        AutomationProperties.SetName(comboBox, name);
+        return comboBox;
+    }
 
-        transform.BeginAnimation(ScaleTransform.ScaleXProperty, animation);
-        transform.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
+    private static ComboBoxItem CreateFrameRateItem(int limit) => new()
+    {
+        Content = limit == 0 ? "自动（跟随显示器）" : $"{limit} Hz",
+        Tag = limit
+    };
+
+    private static Grid CreateComboBoxRow(string text, ComboBox comboBox)
+    {
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var label = new Label
+        {
+            Content = text,
+            Target = comboBox,
+            MinWidth = 96,
+            Padding = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetLabeledBy(comboBox, label);
+        row.Children.Add(label);
+        Grid.SetColumn(comboBox, 1);
+        row.Children.Add(comboBox);
+        return row;
+    }
+
+    private static TextBlock CreateValueText(string text)
+    {
+        var style = new Style(typeof(TextBlock));
+        var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension(SystemColors.GrayTextBrushKey)));
+        style.Triggers.Add(disabled);
+        return new TextBlock
+        {
+            Text = text,
+            MinWidth = 48,
+            TextAlignment = TextAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0),
+            Style = style
+        };
+    }
+
+    private static Grid CreateSliderRow(string text, Slider slider, TextBlock valueText)
+    {
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var label = new Label
+        {
+            Content = text,
+            Target = slider,
+            MinWidth = 96,
+            Padding = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetLabeledBy(slider, label);
+        row.Children.Add(label);
+        Grid.SetColumn(slider, 1);
+        row.Children.Add(slider);
+        Grid.SetColumn(valueText, 2);
+        row.Children.Add(valueText);
+        return row;
     }
 }

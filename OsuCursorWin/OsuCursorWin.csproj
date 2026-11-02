@@ -10,6 +10,7 @@
     <AssemblyName>OsuCursorWin</AssemblyName>
     <RootNamespace>OsuCursorWin</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(UseUiAccess)' == 'true'">app.uiaccess.manifest</ApplicationManifest>
     <ApplicationIcon>1.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
   </PropertyGroup>

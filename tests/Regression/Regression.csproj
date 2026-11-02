@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../OsuCursorWin/AppSettings.cs" Link="AppSettings.cs" />
+    <Compile Include="../../OsuCursorWin/AutoStartManager.cs" Link="AutoStartManager.cs" />
+    <Compile Include="../../OsuCursorWin/MouseButtonState.cs" Link="MouseButtonState.cs" />
+  </ItemGroup>
+</Project>

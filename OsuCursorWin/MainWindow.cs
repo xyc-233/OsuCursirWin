@@ -1,80 +1,60 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Forms;
-using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 using Brushes = System.Windows.Media.Brushes;
-using Image = System.Windows.Controls.Image;
 using MessageBox = System.Windows.MessageBox;
-using Point = System.Windows.Point;
 
 namespace OsuCursorWin;
 
 internal sealed class MainWindow : Window
 {
-    private const double BaseCursorWidth = 30.0;
-    private const double BaseCursorHeight = 42.5;
-    private const double PointerAngle = 24.3;
-    private const double BaseCursorWindowSize = 160.0;
-    private const double BaseCursorWindowMargin = 64.0;
-    private const double MinCursorWidth = 16.0;
-    private const double MaxCursorWidth = 64.0;
-
     private readonly AppSettings _settings;
-    private readonly Canvas _cursorLayer;
-    private readonly Grid _cursorRotate;
-    private readonly Grid _cursorScale;
-    private readonly RotateTransform _rotate;
-    private readonly ScaleTransform _scale;
-    private readonly Image _cursorImage;
-    private readonly Image _additiveImage;
+    private readonly CursorVisual _cursorVisual;
     private readonly NotifyIcon _trayIcon;
     private readonly TapSoundPlayer _tapSoundPlayer;
     private readonly TapSoundPlayer _hoverSoundPlayer;
     private SettingsWindow? _settingsWindow;
     private ToolStripMenuItem? _cursorToggleItem;
     private bool _cursorEnabled = true;
+    private bool _systemCursorVisible = true;
+    private readonly Func<NativeMethods.CURSORINFO?> _cursorInfoProvider;
+    private readonly Func<NativeMethods.CURSORINFO, ResizeDirection>? _resizeDirectionProvider;
+    private readonly ResizeDirectionSampler _resizeSampler;
+    private ResizeSample? _resizeSample;
+    private int _resizeGeneration;
+    private NativeMethods.POINT _resizeSamplePoint;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly DispatcherTimer _topmostTimer;
     private DispatcherTimer? _fallbackTimer;
+    private bool _renderingSubscribed;
+    private bool _updatingFrame;
+    private int _coordinateRevision;
+    private readonly bool _showInitialSettings;
+    private readonly bool _useNativeOverlay;
+    private NativeCursorOverlay? _nativeOverlay;
+    private readonly NativeFrameClock? _frameClock;
+    private readonly DisplayFramePacer _displayRefresh = new();
 
     private NativeMethods.POINT _cursorPoint;
-    private NativeMethods.POINT _downStart;
     private IntPtr _hwnd;
     private double _dpiScaleX = 1.0;
     private double _dpiScaleY = 1.0;
     private double _lastFrameTime;
-    private double _angle;
-    private double _angleVelocity;
-    private double _elasticStartAngle;
-    private double _elasticDuration = 0.6;
-    private double _elasticElapsed;
-    private bool _elasticReturning;
-    private double _scaleValue = 1.0;
-    private double _scaleVelocity;
-    private double _additiveOpacity;
-    private double _opacityVelocity;
-    private bool _mouseDown;
-    private bool _dragActive;
-    private bool _pointerHover;
-    private bool _wasHovering;
+    private double _lastMotionTime = double.NegativeInfinity;
+    private TimeSpan? _lastRenderingTime;
     private bool _wasHoverCandidate;
     private bool _wasResizePrompt;
-    private IntPtr _baselineNormalHandle;
     private double _lastHoverSoundTime = double.NegativeInfinity;
-    private long _lastHookInvalidateTicks;
-    private bool _cursorInstalled;
     private bool _closing;
     private bool _forceTopmost = true;
     private IntPtr _lastCursorHandle;
@@ -82,24 +62,41 @@ internal sealed class MainWindow : Window
     private int _lastWindowY = int.MinValue;
     private int _lastWindowWidth;
     private int _lastWindowHeight;
-    private IntPtr _mouseHook;
-    private NativeMethods.LowLevelMouseProc? _mouseHookProc;
-    private bool _mouseHookActive;
-    private double _cursorWidth;
-    private double _cursorHeight;
-    private double _cursorWindowSize;
-    private double _cursorWindowMargin;
+    private MouseInputSource? _mouseInput;
+    private CursorDimensions _dimensions;
     private readonly bool _smoke;
+    private bool _loaded;
 
-    internal MainWindow(bool smoke = false)
+    internal CursorModel Model { get; } = new();
+    internal bool IsRendering => _renderingSubscribed;
+    internal IntPtr OverlayHandle => _hwnd;
+    internal event Action? FrameRendering;
+    internal event Action? FrameRendered;
+    private bool CanShowOverlay => !_closing && _cursorEnabled
+        && (!_settings.HideWhenCursorHidden || _systemCursorVisible);
+
+    internal MainWindow(bool smoke = false, AppSettings? settings = null, bool showSettings = false,
+        Func<NativeMethods.CURSORINFO?>? cursorInfoProvider = null,
+        Func<NativeMethods.CURSORINFO, ResizeDirection>? resizeDirectionProvider = null, bool nativeOverlay = true)
     {
         _smoke = smoke;
-        _settings = AppSettings.Load();
-        _cursorWidth = Math.Clamp(_settings.CursorWidth, MinCursorWidth, MaxCursorWidth);
-        ApplyCursorDimensions(_cursorWidth);
+        _useNativeOverlay = nativeOverlay;
+        if (nativeOverlay)
+        {
+            _frameClock = new NativeFrameClock(Dispatcher, () => OnRendering(this, EventArgs.Empty));
+        }
+        _cursorInfoProvider = cursorInfoProvider ?? ReadSystemCursorInfo;
+        _resizeDirectionProvider = resizeDirectionProvider;
+        var resizeDetector = new ResizeTargetDetector();
+        _resizeSampler = new ResizeDirectionSampler(sample => resizeDetector.GetDirection(
+            new NativeMethods.POINT { X = sample.X, Y = sample.Y }, sample.OverlayWindow, sample.Axis),
+            OnResizeSampleCompleted);
+        _showInitialSettings = showSettings || (settings is null && !AppSettings.Exists);
+        _settings = settings ?? AppSettings.Load();
+        _dimensions = new CursorDimensions(_settings.CursorWidth);
 
-        Width = _cursorWindowSize;
-        Height = _cursorWindowSize;
+        Width = nativeOverlay ? 1 : _dimensions.WindowSize;
+        Height = nativeOverlay ? 1 : _dimensions.WindowSize;
         Left = 0;
         Top = 0;
         WindowStyle = WindowStyle.None;
@@ -110,46 +107,16 @@ internal sealed class MainWindow : Window
         ShowInTaskbar = false;
         ShowActivated = false;
         Focusable = false;
-        _cursorScale = new Grid
-        {
-            Width = _cursorWidth,
-            Height = _cursorHeight,
-            RenderTransformOrigin = new Point(0, 0)
-        };
-        _scale = new ScaleTransform(1.0, 1.0);
-        _cursorScale.RenderTransform = _scale;
-
-        _cursorImage = LoadImageResource("OsuCursorWin.Images.cursor.png");
-        _cursorScale.Children.Add(_cursorImage);
-
-        _additiveImage = LoadImageResource("OsuCursorWin.Images.cursorAdditive.png");
-        _additiveImage.Opacity = 0.0;
-        _cursorScale.Children.Add(_additiveImage);
-
-        _cursorRotate = new Grid
-        {
-            Width = _cursorWidth,
-            Height = _cursorHeight,
-            RenderTransformOrigin = new Point(0, 0)
-        };
-        _rotate = new RotateTransform(0.0);
-        _cursorRotate.RenderTransform = _rotate;
-        _cursorRotate.Children.Add(_cursorScale);
-
-        _cursorLayer = new Canvas
-        {
-            IsHitTestVisible = false
-        };
-        _cursorLayer.Children.Add(_cursorRotate);
-        Content = _cursorLayer;
+        _cursorVisual = new CursorVisual(_dimensions);
+        Content = nativeOverlay ? null : _cursorVisual;
 
         _tapSoundPlayer = new TapSoundPlayer(LoadResourceBytes("OsuCursorWin.Audio.cursorTap.wav"))
         {
-            Enabled = _settings.TapSoundEnabled
+            Enabled = !smoke && _settings.TapSoundEnabled
         };
         _hoverSoundPlayer = new TapSoundPlayer(LoadResourceBytes("OsuCursorWin.Audio.defaultHover.wav"))
         {
-            Enabled = _settings.HoverSoundEnabled
+            Enabled = !smoke && _settings.HoverSoundEnabled
         };
 
         SourceInitialized += OnSourceInitialized;
@@ -165,10 +132,17 @@ internal sealed class MainWindow : Window
         };
         _topmostTimer.Tick += (_, _) =>
         {
-            _forceTopmost = true;
-            if (_hwnd != IntPtr.Zero && !_closing)
+            _frameClock?.SetRefreshRate(GetAnimationFrameRate());
+            if (_mouseInput is { IsRunning: false })
             {
-                _cursorLayer.InvalidateVisual();
+                UninstallMouseHook();
+                InstallMouseHook();
+            }
+            RefreshSystemCursorVisibility();
+            _forceTopmost = true;
+            if (_hwnd != IntPtr.Zero && CanShowOverlay)
+            {
+                RequestRender();
                 TryBringAboveTaskbarPreview();
             }
         };
@@ -193,47 +167,59 @@ internal sealed class MainWindow : Window
     {
         _hwnd = new WindowInteropHelper(this).Handle;
         NativeMethods.SetClickThrough(_hwnd);
+        if (_useNativeOverlay)
+        {
+            _nativeOverlay = new NativeCursorOverlay();
+            _nativeOverlay.SetHighQualityRendering(_settings.HighQualityRendering);
+            _hwnd = _nativeOverlay.Handle;
+        }
         UpdateCoordinateSystem();
         _forceTopmost = true;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (_loaded)
+        {
+            return;
+        }
+
+        _loaded = true;
         UpdateCoordinateSystem();
 
-        if (!_cursorInstalled)
+        if (!_smoke)
         {
             if (!CursorReplacer.Install())
             {
                 CursorReplacer.Restore();
                 Program.Log("Unable to install system cursor replacement.");
-                if (!_smoke)
-                {
-                    MessageBox.Show(
-                        "无法替换系统光标，程序将退出。",
-                        "osu! Cursor",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                }
+                MessageBox.Show(
+                    "无法替换系统光标，程序将退出。",
+                    "osu! Cursor",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
 
-                Close();
+                System.Windows.Application.Current.Shutdown(1);
                 return;
             }
-
-            _cursorInstalled = true;
         }
 
         _forceTopmost = true;
-        InstallMouseHook();
-        CompositionTarget.Rendering += OnRendering;
-        _lastFrameTime = _clock.Elapsed.TotalSeconds;
+        ResetInputState();
+        if (!_smoke)
+        {
+            InstallMouseHook();
+        }
+        RefreshSystemCursorVisibility();
+        ApplyOverlayVisibility();
+        RequestRender();
 
         if (!_smoke)
         {
-            ApplyAutoStart(_settings.AutoStart);
+            RefreshAutoStart();
         }
 
-        if (!_smoke && !AppSettings.Exists)
+        if (!_smoke && _showInitialSettings)
         {
             ShowSettingsWindow();
         }
@@ -247,16 +233,21 @@ internal sealed class MainWindow : Window
         }
 
         _closing = true;
-        _settingsWindow?.ForceClose();
-        CompositionTarget.Rendering -= OnRendering;
-        UninstallMouseHook();
-        _topmostTimer.Stop();
         CursorReplacer.Restore();
+        _settingsWindow?.ForceClose();
+        _settings.FlushPendingSave();
+        StopRendering();
+        UninstallMouseHook();
+        _resizeSampler.Dispose();
+        _nativeOverlay?.Dispose();
+        _frameClock?.Dispose();
+        _topmostTimer.Stop();
 
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
             _trayIcon.Icon?.Dispose();
+            _trayIcon.ContextMenuStrip?.Dispose();
             _trayIcon.Dispose();
         }
 
@@ -266,143 +257,210 @@ internal sealed class MainWindow : Window
 
     private void UpdateCoordinateSystem()
     {
-        var dpi = VisualTreeHelper.GetDpi(this);
-        _dpiScaleX = dpi.DpiScaleX;
-        _dpiScaleY = dpi.DpiScaleY;
+        var dpi = _nativeOverlay is null ? 0 : NativeMethods.GetDpiForWindow(_hwnd);
+        var visualDpi = VisualTreeHelper.GetDpi(this);
+        _dpiScaleX = dpi > 0 ? dpi / 96.0 : visualDpi.DpiScaleX;
+        _dpiScaleY = dpi > 0 ? dpi / 96.0 : visualDpi.DpiScaleY;
+        _coordinateRevision++;
         _forceTopmost = true;
+        RequestRender();
     }
 
     private void InstallMouseHook()
     {
-        _mouseHookProc = OnLowLevelMouse;
-        _mouseHook = NativeMethods.SetWindowsHookEx(
-            NativeMethods.WhMouseLl,
-            _mouseHookProc,
-            NativeMethods.GetModuleHandle(IntPtr.Zero),
-            0);
-        _mouseHookActive = _mouseHook != IntPtr.Zero;
-        if (!_mouseHookActive)
+        if (_mouseInput is not null)
         {
-            Program.Log($"Mouse hook install failed: {Marshal.GetLastWin32Error()}");
-            _fallbackTimer = new DispatcherTimer
+            return;
+        }
+
+        var source = new MouseInputSource(Dispatcher, ProcessMouseInput);
+        if (source.Start())
+        {
+            _mouseInput = source;
+            ResetInputState(synchronizeButtons: true);
+            _fallbackTimer?.Stop();
+        }
+        else
+        {
+            source.Dispose();
+            Program.Log("Mouse hook unavailable; using cursor polling.");
+            _fallbackTimer ??= new DispatcherTimer
             {
                 Interval = TimeSpan.FromMilliseconds(8)
             };
-            _fallbackTimer.Tick += (_, _) => _cursorLayer.InvalidateVisual();
+            _fallbackTimer.Tick -= OnFallbackTick;
+            _fallbackTimer.Tick += OnFallbackTick;
             _fallbackTimer.Start();
         }
     }
 
     private void UninstallMouseHook()
     {
-        if (_mouseHook != IntPtr.Zero)
-        {
-            NativeMethods.UnhookWindowsHookEx(_mouseHook);
-            _mouseHook = IntPtr.Zero;
-        }
-
-        _mouseHookActive = false;
-
-        if (_fallbackTimer is not null)
-        {
-            _fallbackTimer.Stop();
-            _fallbackTimer = null;
-        }
+        _mouseInput?.Dispose();
+        _mouseInput = null;
+        _fallbackTimer?.Stop();
     }
 
-    private IntPtr OnLowLevelMouse(int nCode, IntPtr wParam, IntPtr lParam)
+    private void OnFallbackTick(object? sender, EventArgs e)
     {
-        if (nCode >= 0)
-        {
-            var data = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-            switch ((uint)wParam.ToInt64())
-            {
-                case NativeMethods.WmMouseMove:
-                    _cursorPoint = data.pt;
-                    break;
-                case NativeMethods.WmLButtonDown:
-                case NativeMethods.WmRButtonDown:
-                case NativeMethods.WmMButtonDown:
-                case NativeMethods.WmXButtonDown:
-                    BeginPress(data.pt);
-                    break;
-                case NativeMethods.WmLButtonUp:
-                case NativeMethods.WmRButtonUp:
-                case NativeMethods.WmMButtonUp:
-                case NativeMethods.WmXButtonUp:
-                    EndPress();
-                    break;
-            }
-
-            InvalidateCursorVisualFromHook();
-        }
-
-        return NativeMethods.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        RequestRender();
     }
 
-    private void OnRendering(object? sender, EventArgs e)
+    internal void ProcessMouseInput(IReadOnlyList<MouseInputEvent> events)
     {
-        if (_closing || _hwnd == IntPtr.Zero)
+        if (!_cursorEnabled || _closing || events.Count == 0)
         {
             return;
         }
 
-        var now = _clock.Elapsed.TotalSeconds;
-        var dt = now - _lastFrameTime;
-        _lastFrameTime = now;
-        if (dt <= 0.0 || dt > 0.1)
+        var wasVisible = CanShowOverlay;
+        RefreshSystemCursorVisibility();
+        if (!CanShowOverlay)
         {
-            dt = 1.0 / 60.0;
+            return;
+        }
+        if (!wasVisible)
+        {
+            UpdateWindowPosition();
+            RequestRender();
+            return;
         }
 
-        UpdateMouseState();
-        UpdateAnimation(dt);
-        UpdateVisual();
+        foreach (var data in events)
+        {
+            UpdateCursorPosition(new NativeMethods.POINT { X = data.X, Y = data.Y });
+            switch (data.Message)
+            {
+                case NativeMethods.WmLButtonDown:
+                    HandleButtonTransition(CursorButtons.Left, true);
+                    break;
+                case NativeMethods.WmRButtonDown:
+                    HandleButtonTransition(CursorButtons.Right, true);
+                    break;
+                case NativeMethods.WmMButtonDown:
+                    HandleButtonTransition(CursorButtons.Middle, true);
+                    break;
+                case NativeMethods.WmXButtonDown:
+                    HandleButtonTransition((data.MouseData >> 16) == 1 ? CursorButtons.X1 : CursorButtons.X2, true);
+                    break;
+                case NativeMethods.WmLButtonUp:
+                    HandleButtonTransition(CursorButtons.Left, false);
+                    break;
+                case NativeMethods.WmRButtonUp:
+                    HandleButtonTransition(CursorButtons.Right, false);
+                    break;
+                case NativeMethods.WmMButtonUp:
+                    HandleButtonTransition(CursorButtons.Middle, false);
+                    break;
+                case NativeMethods.WmXButtonUp:
+                    HandleButtonTransition((data.MouseData >> 16) == 1 ? CursorButtons.X1 : CursorButtons.X2, false);
+                    break;
+            }
+        }
+
+        if (_nativeOverlay is not null)
+        {
+            UpdateWindowPosition();
+        }
+        RequestRender();
     }
 
-    private void UpdateMouseState()
+    private void OnRendering(object? sender, EventArgs e)
     {
-        if (_mouseHookActive)
+        if (!CanShowOverlay || _hwnd == IntPtr.Zero || _updatingFrame)
         {
-            NativeMethods.GetCursorInfo(out var info);
-            UpdatePointerState(info);
+            return;
         }
-        else
+
+        if (e is RenderingEventArgs rendering)
         {
-            if (!NativeMethods.GetCursorInfo(out var info))
+            if (_lastRenderingTime == rendering.RenderingTime)
             {
                 return;
             }
-
-            _cursorPoint = info.ptScreenPos;
-            var pressed = (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0;
-            HandleButtonTransition(pressed);
-            UpdatePointerState(info);
         }
 
-        var winKeyPressed = (NativeMethods.GetAsyncKeyState(0x5B) & 0x8000) != 0
-            || (NativeMethods.GetAsyncKeyState(0x5C) & 0x8000) != 0;
+        _updatingFrame = true;
+        try
+        {
+            var now = _clock.Elapsed.TotalSeconds;
+            if (e is RenderingEventArgs acceptedFrame)
+            {
+                _lastRenderingTime = acceptedFrame.RenderingTime;
+            }
+            var elapsed = now - _lastFrameTime;
+            _lastFrameTime = now;
+            FrameRendering?.Invoke();
+            UpdateMouseState();
+            if (!CanShowOverlay)
+            {
+                return;
+            }
+            var settled = Model.Advance(elapsed);
+            RenderCursor();
+            FrameRendered?.Invoke();
+            if (_settings.PauseRenderingWhenIdle && settled && !_forceTopmost && now - _lastMotionTime >= 0.12)
+            {
+                StopRendering();
+            }
+        }
+        finally
+        {
+            _updatingFrame = false;
+        }
+    }
 
-        if (winKeyPressed)
+    internal void UpdateMouseState()
+    {
+        if (IsKeyPressed(0x5B) || IsKeyPressed(0x5C))
         {
             _forceTopmost = true;
         }
 
-        if (_mouseDown && !_dragActive)
+        var hasCursorInfo = TryReadCursorInfo(out var info);
+        if (hasCursorInfo)
         {
-            var dx = _cursorPoint.X - _downStart.X;
-            var dy = _cursorPoint.Y - _downStart.Y;
-            var threshold = _cursorWidth * _dpiScaleX;
-            if (dx * dx + dy * dy > threshold * threshold)
+            UpdateSystemCursorVisibility(info);
+            if (_mouseInput is null)
             {
-                _dragActive = true;
+                UpdateCursorPosition(info.ptScreenPos);
             }
         }
+
+        if (!CanShowOverlay)
+        {
+            return;
+        }
+
+        if (hasCursorInfo)
+        {
+            UpdateResizeDirection(info);
+            _resizeSamplePoint = info.ptScreenPos;
+        }
+
+        if (!_smoke && _mouseInput is null)
+        {
+            HandleButtonChanges(Model.SetButtons(ReadMouseButtons()));
+        }
+
+        if (hasCursorInfo)
+        {
+            UpdatePointerState(info);
+        }
+    }
+
+    private void UpdateCursorPosition(NativeMethods.POINT point)
+    {
+        if (_cursorPoint.X != point.X || _cursorPoint.Y != point.Y)
+        {
+            _lastMotionTime = _clock.Elapsed.TotalSeconds;
+        }
+        _cursorPoint = point;
+        Model.MoveTo(point.X, point.Y, _dimensions.Width * _dpiScaleX);
     }
 
     private void UpdatePointerState(NativeMethods.CURSORINFO info)
     {
-        var normalHandle = CursorReplacer.GetBlankHandle(NativeMethods.OCR_NORMAL);
         var handHandle = CursorReplacer.GetBlankHandle(NativeMethods.OCR_HAND);
 
         if (info.hCursor != _lastCursorHandle)
@@ -411,13 +469,13 @@ internal sealed class MainWindow : Window
             _forceTopmost = true;
         }
 
-        _pointerHover = info.hCursor != IntPtr.Zero
+        Model.IsHovering = info.hCursor != IntPtr.Zero
             && info.hCursor == handHandle;
 
         if (_settings.HoverSoundAsResizePrompt)
         {
-            var resize = IsResizeCursor();
-            if (resize && !_wasResizePrompt && !_mouseDown)
+            var resize = IsResizeCursor(info.hCursor);
+            if (resize && !_wasResizePrompt && !Model.IsPressed)
             {
                 PlayHoverSample();
             }
@@ -426,165 +484,62 @@ internal sealed class MainWindow : Window
         }
         else
         {
-            if (_baselineNormalHandle == IntPtr.Zero && info.hCursor != IntPtr.Zero && info.hCursor != handHandle)
-            {
-                _baselineNormalHandle = info.hCursor;
-            }
+            var isHoverCandidate = Model.IsHovering;
 
-            var isHoverCandidate = _pointerHover
-                || (info.hCursor != IntPtr.Zero
-                    && info.hCursor != normalHandle
-                    && info.hCursor != _baselineNormalHandle);
-
-            if (isHoverCandidate && !_wasHoverCandidate && !_mouseDown)
+            if (isHoverCandidate && !_wasHoverCandidate && !Model.IsPressed)
             {
                 PlayHoverSample();
             }
 
-            if (!isHoverCandidate)
-            {
-                _baselineNormalHandle = info.hCursor == normalHandle ? normalHandle : info.hCursor;
-            }
-
             _wasHoverCandidate = isHoverCandidate;
-            _wasHovering = _pointerHover;
         }
     }
 
-    private void HandleButtonTransition(bool pressed)
+    internal void HandleButtonTransition(CursorButtons button, bool pressed)
     {
-        if (pressed)
+        if (pressed && !Model.IsPressed
+            && (Model.Position.X != _resizeSamplePoint.X || Model.Position.Y != _resizeSamplePoint.Y))
         {
-            BeginPress(_cursorPoint);
+            Model.ResizeDirection = ResizeDirection.None;
+            ResetResizeSampling();
         }
-        else
-        {
-            EndPress();
-        }
+        HandleButtonChanges(Model.SetButton(button, pressed));
     }
 
-    private void BeginPress(NativeMethods.POINT point)
+    private void HandleButtonChanges(ButtonChanges changes)
     {
-        _elasticReturning = false;
-        _mouseDown = true;
-        _downStart = point;
-        _dragActive = false;
-        _forceTopmost = true;
-        PlayTapSample(1.0);
-    }
-
-    private void EndPress()
-    {
-        if (!_mouseDown)
+        if (!changes.Any)
         {
             return;
         }
 
-        if (_dragActive)
+        var pressed = (uint)changes.Pressed;
+        while (pressed != 0)
         {
-            StartElasticReturn();
+            PlayTapSample(1.0);
+            pressed &= pressed - 1;
         }
-
-        PlayTapSample(0.8);
-        _mouseDown = false;
-        _dragActive = false;
+        var released = (uint)changes.Released;
+        while (released != 0)
+        {
+            PlayTapSample(0.8);
+            released &= released - 1;
+        }
         _forceTopmost = true;
     }
 
-    private void StartElasticReturn()
+    private void UpdateWindowPosition(bool refreshDpi = true)
     {
-        if (Math.Abs(_angle) < 0.5)
+        if (!CanShowOverlay)
         {
             return;
         }
 
-        _elasticStartAngle = _angle;
-        _elasticDuration = 0.6 * (1.0 + Math.Abs(_angle / 720.0));
-        _elasticElapsed = 0.0;
-        _elasticReturning = true;
-        _angleVelocity = 0.0;
-    }
-
-    private void UpdateElasticReturn(double dt)
-    {
-        _elasticElapsed += dt;
-        var t = Math.Min(1.0, _elasticElapsed / _elasticDuration);
-        _angle = _elasticStartAngle * (1.0 - ElasticOut(t));
-
-        if (t >= 1.0)
-        {
-            _angle = 0.0;
-            _elasticReturning = false;
-            _angleVelocity = 0.0;
-        }
-    }
-
-    private static double ElasticOut(double t)
-    {
-        return Math.Pow(2.0, -10.0 * t)
-            * Math.Sin((0.5 * t - 0.075) * 20.943951023931955)
-            + 1.0
-            - 0.0004882812499999998 * t;
-    }
-
-    private void UpdateAnimation(double dt)
-    {
-        double targetScale;
-        double targetAdditive;
-
-        if (_mouseDown)
-        {
-            targetAdditive = 1.0;
-            targetScale = 0.9;
-            var targetAngle = _dragActive ? CalculateDragAngle() : 0.0;
-            var angleDelta = NormalizeAngle(targetAngle - _angle);
-            _angle += angleDelta * Math.Clamp(dt * 8.0, 0.0, 1.0);
-        }
-        else if (_elasticReturning)
-        {
-            UpdateElasticReturn(dt);
-            targetAdditive = 0.0;
-            targetScale = 1.0;
-        }
-        else
-        {
-            var targetAngle = _pointerHover ? PointerAngle : 0.0;
-            var angleDelta = NormalizeAngle(targetAngle - _angle);
-            _angleVelocity += (240.0 * angleDelta - 20.0 * _angleVelocity) * dt;
-            _angle += _angleVelocity * dt;
-            targetAdditive = _pointerHover ? 1.0 : 0.0;
-            targetScale = 1.0;
-        }
-
-        _scaleVelocity += (240.0 * (targetScale - _scaleValue) - 20.0 * _scaleVelocity) * dt;
-        _scaleValue += _scaleVelocity * dt;
-
-        _opacityVelocity += (160.0 * (targetAdditive - _additiveOpacity) - 18.0 * _opacityVelocity) * dt;
-        _additiveOpacity += _opacityVelocity * dt;
-
-        _scaleValue = Math.Clamp(_scaleValue, 0.8, 1.1);
-        _additiveOpacity = Math.Clamp(_additiveOpacity, 0.0, 1.0);
-    }
-
-    private void UpdateVisual()
-    {
-        Canvas.SetLeft(_cursorRotate, _cursorWindowMargin);
-        Canvas.SetTop(_cursorRotate, _cursorWindowMargin);
-
-        _rotate.Angle = _angle;
-        _scale.ScaleX = _scaleValue;
-        _scale.ScaleY = _scaleValue;
-        _additiveImage.Opacity = _additiveOpacity;
-
-        UpdateWindowPosition();
-    }
-
-    private void UpdateWindowPosition()
-    {
-        var windowWidth = Math.Max(1, (int)Math.Ceiling(_cursorWindowSize * _dpiScaleX));
-        var windowHeight = Math.Max(1, (int)Math.Ceiling(_cursorWindowSize * _dpiScaleY));
-        var x = _cursorPoint.X - (int)Math.Round(_cursorWindowMargin * _dpiScaleX);
-        var y = _cursorPoint.Y - (int)Math.Round(_cursorWindowMargin * _dpiScaleY);
+        var windowWidth = Math.Max(1, (int)Math.Ceiling(_dimensions.WindowSize * _dpiScaleX));
+        var windowHeight = Math.Max(1, (int)Math.Ceiling(_dimensions.WindowSize * _dpiScaleY));
+        var x = _cursorPoint.X - (int)Math.Round(_dimensions.Margin * _dpiScaleX);
+        var y = _cursorPoint.Y - (int)Math.Round(_dimensions.Margin * _dpiScaleY);
+        var revision = _coordinateRevision;
 
         if (_hwnd != IntPtr.Zero
             && (_forceTopmost
@@ -593,61 +548,45 @@ internal sealed class MainWindow : Window
                 || windowWidth != _lastWindowWidth
                 || windowHeight != _lastWindowHeight))
         {
-            NativeMethods.MoveTopmost(_hwnd, x, y, windowWidth, windowHeight);
+            var fullUpdate = _forceTopmost || windowWidth != _lastWindowWidth || windowHeight != _lastWindowHeight;
+            var moved = fullUpdate
+                ? NativeMethods.MoveTopmost(_hwnd, x, y, windowWidth, windowHeight)
+                : NativeMethods.MoveOverlay(_hwnd, x, y);
+            if (!moved)
+            {
+                return;
+            }
             _lastWindowX = x;
             _lastWindowY = y;
             _lastWindowWidth = windowWidth;
             _lastWindowHeight = windowHeight;
-            _forceTopmost = false;
+            _forceTopmost = revision != _coordinateRevision;
+            if (_nativeOverlay is not null)
+            {
+                var dpi = NativeMethods.GetDpiForWindow(_hwnd);
+                if (dpi > 0 && Math.Abs(_dpiScaleX - dpi / 96.0) > 0.001)
+                {
+                    UpdateCoordinateSystem();
+                    if (refreshDpi)
+                    {
+                        UpdateWindowPosition(refreshDpi: false);
+                    }
+                }
+            }
         }
     }
 
-    private double CalculateDragAngle()
+    private void RenderCursor()
     {
-        var dx = _cursorPoint.X - _downStart.X;
-        var dy = _cursorPoint.Y - _downStart.Y;
-        return Math.Atan2(-dx, dy) * 180.0 / Math.PI + PointerAngle;
-    }
-
-    private static double NormalizeAngle(double degrees)
-    {
-        degrees %= 360.0;
-        if (degrees > 180.0)
+        if (_nativeOverlay is null)
         {
-            degrees -= 360.0;
-        }
-        else if (degrees < -180.0)
-        {
-            degrees += 360.0;
+            _cursorVisual.Render(Model);
+            UpdateWindowPosition();
+            return;
         }
 
-        return degrees;
-    }
-
-    private Image LoadImageResource(string resourceName)
-    {
-        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Missing embedded resource: {resourceName}");
-
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.StreamSource = stream;
-        bitmap.EndInit();
-        bitmap.Freeze();
-
-        var image = new Image
-        {
-            Source = bitmap,
-            Width = _cursorWidth,
-            Height = _cursorHeight,
-            Stretch = Stretch.Fill,
-            IsHitTestVisible = false
-        };
-
-        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.Fant);
-        RenderOptions.SetEdgeMode(image, EdgeMode.Unspecified);
-        return image;
+        UpdateWindowPosition();
+        _nativeOverlay.Render(Model, _dimensions, _dpiScaleX, _dpiScaleY, _lastWindowX, _lastWindowY);
     }
 
     private NotifyIcon CreateTrayIcon()
@@ -675,13 +614,19 @@ internal sealed class MainWindow : Window
         {
             Icon = ProgramIcon.CreateIcon(),
             Text = "osu! Cursor",
-            Visible = true,
+            Visible = !_smoke,
             ContextMenuStrip = menu
         };
     }
 
     private void ShowSettingsWindow()
     {
+        if (_smoke)
+        {
+            return;
+        }
+
+        RefreshAutoStart();
         if (_settingsWindow is null)
         {
             _settingsWindow = new SettingsWindow(_settings);
@@ -692,6 +637,10 @@ internal sealed class MainWindow : Window
             _settingsWindow.HoverSoundChanged += ApplyHoverSound;
             _settingsWindow.HoverSoundVolumeChanged += ApplyHoverSoundVolume;
             _settingsWindow.ResizeSoundModeChanged += ApplyHoverSoundMode;
+            _settingsWindow.HideWhenCursorHiddenChanged += ApplyHideWhenCursorHidden;
+            _settingsWindow.AnimationFrameRateLimitChanged += ApplyAnimationFrameRateLimit;
+            _settingsWindow.HighQualityRenderingChanged += ApplyHighQualityRendering;
+            _settingsWindow.PauseRenderingWhenIdleChanged += ApplyPauseRenderingWhenIdle;
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
 
@@ -699,42 +648,50 @@ internal sealed class MainWindow : Window
         _settingsWindow.Activate();
     }
 
-    private void ApplyCursorDimensions(double width)
+    internal void ApplyCursorDimensions(double width)
     {
-        width = Math.Clamp(width, MinCursorWidth, MaxCursorWidth);
-        _cursorWidth = width;
-        _cursorHeight = width * (BaseCursorHeight / BaseCursorWidth);
-        _cursorWindowSize = width * (BaseCursorWindowSize / BaseCursorWidth);
-        _cursorWindowMargin = width * (BaseCursorWindowMargin / BaseCursorWidth);
-
-        if (_cursorScale is not null)
+        _coordinateRevision++;
+        _dimensions = new CursorDimensions(width);
+        _cursorVisual.Resize(_dimensions);
+        if (!_useNativeOverlay)
         {
-            _cursorScale.Width = _cursorWidth;
-            _cursorScale.Height = _cursorHeight;
+            Width = Height = _dimensions.WindowSize;
         }
-
-        if (_cursorRotate is not null)
-        {
-            _cursorRotate.Width = _cursorWidth;
-            _cursorRotate.Height = _cursorHeight;
-        }
-
-        if (_cursorImage is not null)
-        {
-            _cursorImage.Width = _cursorWidth;
-            _cursorImage.Height = _cursorHeight;
-            _additiveImage.Width = _cursorWidth;
-            _additiveImage.Height = _cursorHeight;
-            _settings.CursorWidth = width;
-            _settings.Save();
-        }
-
+        _settings.CursorWidth = _dimensions.Width;
+        _settings.ScheduleSave();
         _forceTopmost = true;
+        RequestRender();
     }
 
-    private void SetCursorEnabled(bool enabled)
+    internal void ApplyAnimationFrameRateLimit(int limit)
     {
-        if (_cursorEnabled == enabled)
+        if (_closing) return;
+        _settings.AnimationFrameRateLimit = AppSettings.NormalizeAnimationFrameRateLimit(limit);
+        _frameClock?.SetRefreshRate(GetAnimationFrameRate());
+        RequestRender();
+        _settings.ScheduleSave();
+    }
+
+    internal void ApplyHighQualityRendering(bool enabled)
+    {
+        if (_closing) return;
+        _settings.HighQualityRendering = enabled;
+        _nativeOverlay?.SetHighQualityRendering(enabled);
+        RequestRender();
+        _settings.ScheduleSave();
+    }
+
+    internal void ApplyPauseRenderingWhenIdle(bool enabled)
+    {
+        if (_closing) return;
+        _settings.PauseRenderingWhenIdle = enabled;
+        RequestRender();
+        _settings.ScheduleSave();
+    }
+
+    internal void SetCursorEnabled(bool enabled)
+    {
+        if (_closing || _cursorEnabled == enabled)
         {
             return;
         }
@@ -747,7 +704,7 @@ internal sealed class MainWindow : Window
 
         if (enabled)
         {
-            if (!CursorReplacer.Install())
+            if (!_smoke && !CursorReplacer.Install())
             {
                 _cursorEnabled = false;
                 if (_cursorToggleItem is not null)
@@ -760,32 +717,142 @@ internal sealed class MainWindow : Window
             }
 
             _forceTopmost = true;
-            InstallMouseHook();
-            CompositionTarget.Rendering += OnRendering;
-            _lastFrameTime = _clock.Elapsed.TotalSeconds;
+            ResetInputState(synchronizeButtons: true);
+            if (!_smoke)
+            {
+                InstallMouseHook();
+            }
+            RefreshSystemCursorVisibility();
+            ApplyOverlayVisibility();
             _topmostTimer.Start();
-            Show();
         }
         else
         {
-            CompositionTarget.Rendering -= OnRendering;
+            StopRendering();
             UninstallMouseHook();
+            ResetResizeSampling();
             _topmostTimer.Stop();
             CursorReplacer.Restore();
-            Hide();
+            if (_nativeOverlay is not null)
+            {
+                _nativeOverlay.SetVisible(false);
+            }
+            else
+            {
+                Hide();
+            }
+            UpdateSoundAvailability();
         }
     }
 
+    internal void ApplyHideWhenCursorHidden(bool enabled)
+    {
+        _settings.HideWhenCursorHidden = enabled;
+        RefreshSystemCursorVisibility();
+        ApplyOverlayVisibility();
+        _settings.Save();
+    }
+
+    internal void RefreshSystemCursorVisibility()
+    {
+        if (!_closing && TryReadCursorInfo(out var info))
+        {
+            UpdateSystemCursorVisibility(info);
+        }
+    }
+
+    private void UpdateSystemCursorVisibility(NativeMethods.CURSORINFO info)
+    {
+        var visible = (info.flags & NativeMethods.CursorShowing) != 0
+            && (info.flags & NativeMethods.CursorSuppressed) == 0;
+        if (_systemCursorVisible == visible)
+        {
+            return;
+        }
+
+        _systemCursorVisible = visible;
+        ApplyOverlayVisibility();
+    }
+
+    private void ApplyOverlayVisibility()
+    {
+        if (_closing || !_loaded || _hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        UpdateSoundAvailability();
+        if (_nativeOverlay is not null)
+        {
+            if (!CanShowOverlay)
+            {
+                StopRendering();
+                if (_nativeOverlay.IsVisible)
+                {
+                    ResetInputState();
+                    _nativeOverlay.SetVisible(false);
+                }
+                return;
+            }
+            if (!_nativeOverlay.IsVisible)
+            {
+                ResetInputState(synchronizeButtons: true);
+                _forceTopmost = true;
+                RenderCursor();
+                _nativeOverlay.SetVisible(true);
+            }
+            RequestRender();
+            return;
+        }
+        if (!CanShowOverlay)
+        {
+            StopRendering();
+            if (IsVisible)
+            {
+                ResetInputState();
+                Hide();
+            }
+            return;
+        }
+
+        if (!IsVisible)
+        {
+            ResetInputState(synchronizeButtons: true);
+            _cursorVisual.Render(Model);
+            _forceTopmost = true;
+            UpdateWindowPosition();
+            Show();
+        }
+        RequestRender();
+    }
+
+    private void UpdateSoundAvailability()
+    {
+        _tapSoundPlayer.Enabled = !_smoke && CanShowOverlay && _settings.TapSoundEnabled;
+        _hoverSoundPlayer.Enabled = !_smoke && CanShowOverlay && _settings.HoverSoundEnabled;
+    }
+
+    private bool TryReadCursorInfo(out NativeMethods.CURSORINFO info)
+    {
+        var result = _cursorInfoProvider();
+        info = result.GetValueOrDefault();
+        return result.HasValue;
+    }
+
+    private static NativeMethods.CURSORINFO? ReadSystemCursorInfo() =>
+        NativeMethods.GetCursorInfo(out var info) ? info : null;
+
     private void ApplyAutoStart(bool enabled)
     {
+        var previous = _settings.AutoStart;
         var applied = AutoStartManager.Apply(enabled);
         if (!applied)
         {
             Program.Log($"Failed to apply auto-start={enabled}");
-            var reverted = !enabled;
-            _settings.AutoStart = reverted;
-            _settings.Save();
-            _settingsWindow?.SetAutoStartChecked(reverted);
+            _settingsWindow?.SetAutoStartChecked(previous);
+            RefreshAutoStart();
+            MessageBox.Show("无法修改登录启动项，请检查当前用户的启动项权限。", "osu! Cursor",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -793,41 +860,58 @@ internal sealed class MainWindow : Window
         _settings.Save();
     }
 
+    private void RefreshAutoStart()
+    {
+        if (AutoStartManager.GetEnabled() is not bool enabled)
+        {
+            return;
+        }
+
+        if (_settings.AutoStart != enabled)
+        {
+            _settings.AutoStart = enabled;
+            _settings.Save();
+        }
+        _settingsWindow?.SetAutoStartChecked(enabled);
+    }
+
     private void ApplyTapSound(bool enabled)
     {
         _settings.TapSoundEnabled = enabled;
-        _tapSoundPlayer.Enabled = enabled;
+        UpdateSoundAvailability();
         _settings.Save();
     }
 
     private void ApplyTapSoundVolume(double volume)
     {
         _settings.TapSoundVolume = Math.Clamp(volume, 0.0, 1.0);
-        _settings.Save();
+        _settings.ScheduleSave();
     }
 
     private void ApplyHoverSound(bool enabled)
     {
         _settings.HoverSoundEnabled = enabled;
-        _hoverSoundPlayer.Enabled = enabled;
+        UpdateSoundAvailability();
         _settings.Save();
     }
 
     private void ApplyHoverSoundVolume(double volume)
     {
         _settings.HoverSoundVolume = Math.Clamp(volume, 0.0, 1.0);
-        _settings.Save();
+        _settings.ScheduleSave();
     }
 
     private void ApplyHoverSoundMode(bool resizePrompt)
     {
         _settings.HoverSoundAsResizePrompt = resizePrompt;
+        _wasHoverCandidate = false;
+        _wasResizePrompt = false;
         _settings.Save();
     }
 
     private void PlayTapSample(double baseFrequency)
     {
-        if (!_cursorEnabled || !_tapSoundPlayer.Enabled)
+        if (!CanShowOverlay || !_tapSoundPlayer.Enabled)
         {
             return;
         }
@@ -844,7 +928,7 @@ internal sealed class MainWindow : Window
 
     private void PlayHoverSample()
     {
-        if (!_cursorEnabled || !_hoverSoundPlayer.Enabled || _settings.HoverSoundVolume <= 0.0)
+        if (!CanShowOverlay || !_hoverSoundPlayer.Enabled || _settings.HoverSoundVolume <= 0.0)
         {
             return;
         }
@@ -862,59 +946,177 @@ internal sealed class MainWindow : Window
 
     private double GetCurrentBalance()
     {
-        var virtualLeft = SystemParameters.VirtualScreenLeft;
-        var virtualWidth = SystemParameters.VirtualScreenWidth;
-        var xDip = _cursorPoint.X / _dpiScaleX;
-        return Math.Clamp(((xDip - virtualLeft) / virtualWidth) * 2.0 - 1.0, -0.6, 0.6);
+        var bounds = SystemInformation.VirtualScreen;
+        return bounds.Width > 0
+            ? Math.Clamp(((double)(_cursorPoint.X - bounds.Left) / bounds.Width) * 2.0 - 1.0, -0.6, 0.6)
+            : 0.0;
     }
 
-    private void InvalidateCursorVisualFromHook()
+    internal void RequestRender()
     {
-        var now = _clock.ElapsedTicks;
-        if (now - _lastHookInvalidateTicks >= TimeSpan.TicksPerMillisecond * 8)
+        if (!CanShowOverlay || _hwnd == IntPtr.Zero || _renderingSubscribed)
         {
-            _lastHookInvalidateTicks = now;
-            _cursorLayer.InvalidateVisual();
+            return;
+        }
+
+        _lastFrameTime = _clock.Elapsed.TotalSeconds;
+        _lastRenderingTime = null;
+        if (_frameClock is not null)
+        {
+            _frameClock.Start(GetAnimationFrameRate());
+        }
+        else
+        {
+            CompositionTarget.Rendering += OnRendering;
+        }
+        _renderingSubscribed = true;
+        _cursorVisual.InvalidateVisual();
+    }
+
+    internal void StopRendering()
+    {
+        CompositionTarget.Rendering -= OnRendering;
+        _frameClock?.Stop();
+        _renderingSubscribed = false;
+    }
+
+    private double GetAnimationFrameRate() =>
+        _settings.GetAnimationFrameRate(_displayRefresh.GetRefreshRate(_cursorPoint.X, _cursorPoint.Y));
+
+    private void ResetInputState(bool synchronizeButtons = false)
+    {
+        Model.Reset();
+        ResetResizeSampling();
+        _wasHoverCandidate = false;
+        _wasResizePrompt = false;
+        _lastCursorHandle = IntPtr.Zero;
+        _lastHoverSoundTime = double.NegativeInfinity;
+        var inputSnapshot = _mouseInput?.ResetTracking();
+        if (inputSnapshot is { } sample)
+        {
+            UpdateCursorPosition(new NativeMethods.POINT { X = sample.X, Y = sample.Y });
+        }
+        if (TryReadCursorInfo(out var info))
+        {
+            if (!inputSnapshot.HasValue)
+            {
+                UpdateCursorPosition(info.ptScreenPos);
+            }
+            if (synchronizeButtons)
+            {
+                Model.IsHovering = info.hCursor != IntPtr.Zero
+                    && info.hCursor == CursorReplacer.GetBlankHandle(NativeMethods.OCR_HAND);
+                _wasHoverCandidate = Model.IsHovering;
+                _wasResizePrompt = IsResizeCursor(info.hCursor);
+            }
+        }
+        if (synchronizeButtons && !_smoke)
+        {
+            Model.SetButtons(inputSnapshot is { } snapshot ? (CursorButtons)snapshot.Buttons : ReadMouseButtons());
         }
     }
 
-    private bool IsResizeCursor()
+    private static CursorButtons ReadMouseButtons()
     {
-        var window = NativeMethods.WindowFromPoint(_cursorPoint);
-        if (window == IntPtr.Zero)
+        var buttons = CursorButtons.None;
+        if (IsKeyPressed(0x01)) buttons |= CursorButtons.Left;
+        if (IsKeyPressed(0x02)) buttons |= CursorButtons.Right;
+        if (IsKeyPressed(0x04)) buttons |= CursorButtons.Middle;
+        if (IsKeyPressed(0x05)) buttons |= CursorButtons.X1;
+        if (IsKeyPressed(0x06)) buttons |= CursorButtons.X2;
+        return buttons;
+    }
+
+    private static bool IsKeyPressed(int key) => (NativeMethods.GetAsyncKeyState(key) & 0x8000) != 0;
+
+    private static bool IsResizeCursor(IntPtr cursor)
+        => GetResizeAxis(cursor) != ResizeCursorAxis.None;
+
+    private void UpdateResizeDirection(NativeMethods.CURSORINFO info)
+    {
+        if (_resizeDirectionProvider is not null)
         {
-            return false;
+            Model.ResizeDirection = _resizeDirectionProvider(info);
+            return;
         }
 
-        var root = NativeMethods.GetAncestor(window, (uint)NativeMethods.GaRoot);
-        if (root == IntPtr.Zero || root == _hwnd)
+        var axis = GetResizeAxis(info.hCursor);
+        if (axis == ResizeCursorAxis.None)
         {
-            return false;
+            if (_resizeSample.HasValue)
+            {
+                ResetResizeSampling();
+            }
+            Model.ResizeDirection = ResizeDirection.None;
+            return;
         }
 
-        var style = NativeMethods.GetWindowStyle(root);
-        if ((style & NativeMethods.WsMaximize) != 0 || (style & NativeMethods.WsThickFrame) == 0)
+        var sample = new ResizeSample(info.ptScreenPos.X, info.ptScreenPos.Y, _hwnd, axis, _resizeGeneration);
+        if (_resizeSample?.Axis != axis)
         {
-            return false;
+            Model.ResizeDirection = ResizeDirection.None;
+        }
+        _resizeSample = sample;
+        _resizeSampler.Request(sample);
+    }
+
+    private void OnResizeSampleCompleted(ResizeSample sample, ResizeDirection direction)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+            return;
         }
 
-        if (!NativeMethods.GetWindowRect(root, out var rect))
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
         {
-            return false;
+            if (!CanShowOverlay || _resizeSample != sample
+                || sample.X != _cursorPoint.X || sample.Y != _cursorPoint.Y)
+            {
+                return;
+            }
+            if (Model.ResizeDirection != direction)
+            {
+                Model.ResizeDirection = direction;
+                RequestRender();
+            }
+        }));
+    }
+
+    private void ResetResizeSampling()
+    {
+        _resizeGeneration++;
+        _resizeSample = null;
+        _resizeSampler.Reset();
+    }
+
+    private static ResizeCursorAxis GetResizeAxis(IntPtr cursor)
+    {
+        if (cursor == IntPtr.Zero)
+        {
+            return ResizeCursorAxis.None;
         }
-
-        var borderX = Math.Max(1, NativeMethods.GetSystemMetrics(NativeMethods.SmCxSizeFrame));
-        var borderY = Math.Max(1, NativeMethods.GetSystemMetrics(NativeMethods.SmCySizeFrame));
-
-        return _cursorPoint.X <= rect.Left + borderX
-            || _cursorPoint.X >= rect.Right - borderX
-            || _cursorPoint.Y <= rect.Top + borderY
-            || _cursorPoint.Y >= rect.Bottom - borderY;
+        if (cursor == CursorReplacer.GetBlankHandle(NativeMethods.OCR_SIZEWE))
+        {
+            return ResizeCursorAxis.Horizontal;
+        }
+        if (cursor == CursorReplacer.GetBlankHandle(NativeMethods.OCR_SIZENS))
+        {
+            return ResizeCursorAxis.Vertical;
+        }
+        if (cursor == CursorReplacer.GetBlankHandle(NativeMethods.OCR_SIZENWSE))
+        {
+            return ResizeCursorAxis.NorthWestSouthEast;
+        }
+        if (cursor == CursorReplacer.GetBlankHandle(NativeMethods.OCR_SIZENESW))
+        {
+            return ResizeCursorAxis.NorthEastSouthWest;
+        }
+        return ResizeCursorAxis.None;
     }
 
     private void TryBringAboveTaskbarPreview()
     {
-        if (_hwnd == IntPtr.Zero)
+        if (_hwnd == IntPtr.Zero || !CanShowOverlay)
         {
             return;
         }
@@ -924,18 +1126,21 @@ internal sealed class MainWindow : Window
             ? NativeMethods.GetAncestor(preview, (uint)NativeMethods.GaRoot)
             : IntPtr.Zero;
 
-        if (IsTaskListThumbnail(root))
+        if (NativeMethods.IsWindowVisible(root) && IsTaskListThumbnail(root))
         {
-            NativeMethods.BringAbove(_hwnd, root);
+            NativeMethods.BringAbove(_hwnd);
             return;
         }
 
         var found = NativeMethods.FindWindow("TaskListThumbnailWnd", null);
         while (found != IntPtr.Zero)
         {
-            if (NativeMethods.GetWindowRect(found, out var rect) && PointInRect(_cursorPoint, rect))
+            if (NativeMethods.IsWindowVisible(found)
+                && IsTaskListThumbnail(found)
+                && NativeMethods.GetWindowRect(found, out var rect)
+                && PointInRect(_cursorPoint, rect))
             {
-                NativeMethods.BringAbove(_hwnd, found);
+                NativeMethods.BringAbove(_hwnd);
                 return;
             }
 

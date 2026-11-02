@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -6,6 +7,9 @@ namespace OsuCursorWin;
 
 internal static class NativeMethods
 {
+    internal const int CursorShowing = 0x00000001;
+    internal const int CursorSuppressed = 0x00000002;
+
     internal const uint OCR_NORMAL = 32512;
     internal const uint OCR_IBEAM = 32513;
     internal const uint OCR_WAIT = 32514;
@@ -32,6 +36,21 @@ internal static class NativeMethods
     internal const long WsMaximize = 0x01000000L;
     internal const int SmCxSizeFrame = 32;
     internal const int SmCySizeFrame = 33;
+    internal const int SmCxPaddedBorder = 92;
+    internal const int DwmwaCloaked = 14;
+
+    internal const uint WmNcHitTest = 0x0084;
+    internal const uint SmtoBlock = 0x0001;
+    internal const uint SmtoAbortIfHung = 0x0002;
+    internal const uint SmtoErrorOnExit = 0x0020;
+    internal const int HtLeft = 10;
+    internal const int HtRight = 11;
+    internal const int HtTop = 12;
+    internal const int HtTopLeft = 13;
+    internal const int HtTopRight = 14;
+    internal const int HtBottom = 15;
+    internal const int HtBottomLeft = 16;
+    internal const int HtBottomRight = 17;
 
     internal static readonly IntPtr HwndTopmost = new(-1);
     internal static readonly IntPtr HwndTop = IntPtr.Zero;
@@ -41,8 +60,10 @@ internal static class NativeMethods
 
     internal const uint SwpNoMove = 0x0002;
     internal const uint SwpNoSize = 0x0001;
+    internal const uint SwpNoZOrder = 0x0004;
     internal const uint SwpNoActivate = 0x0010;
     internal const uint SwpShowWindow = 0x0040;
+    internal const uint SwpNoOwnerZOrder = 0x0200;
 
     internal const int WhMouseLl = 14;
     internal const uint WmMouseMove = 0x0200;
@@ -100,10 +121,25 @@ internal static class NativeMethods
 
     internal static void SetClickThrough(IntPtr hwnd)
     {
+        Marshal.SetLastPInvokeError(0);
         long exstyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        if (exstyle == 0 && Marshal.GetLastWin32Error() != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
         exstyle |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST;
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(exstyle));
-        SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
+        Marshal.SetLastPInvokeError(0);
+        if (SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(exstyle)) == IntPtr.Zero
+            && Marshal.GetLastWin32Error() != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        if (!SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
     }
 
     internal static long GetWindowStyle(IntPtr hwnd)
@@ -111,21 +147,50 @@ internal static class NativeMethods
         return GetWindowLongPtr(hwnd, GwlStyle).ToInt64();
     }
 
-    internal static void MoveTopmost(IntPtr hwnd, int x, int y, int width, int height)
+    internal static long GetWindowExtendedStyle(IntPtr hwnd)
     {
-        SetWindowPos(hwnd, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
+        return GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
     }
 
-    internal static void BringAbove(IntPtr hwnd, IntPtr insertAfter)
+    internal static bool MoveTopmost(IntPtr hwnd, int x, int y, int width, int height)
     {
-        SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate);
+        return SetWindowPos(hwnd, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
+    }
+
+    internal static bool MoveOverlay(IntPtr hwnd, int x, int y)
+    {
+        return SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
+            SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpNoOwnerZOrder);
+    }
+
+    internal static void BringAbove(IntPtr hwnd)
+    {
+        SetWindowPos(hwnd, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate);
+    }
+
+    private static IntPtr GetWindowLongPtr(IntPtr hwnd, int index)
+    {
+        return IntPtr.Size == 8 ? GetWindowLongPtr64(hwnd, index) : new IntPtr(GetWindowLong32(hwnd, index));
+    }
+
+    private static IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value)
+    {
+        return IntPtr.Size == 8
+            ? SetWindowLongPtr64(hwnd, index, value)
+            : new IntPtr(SetWindowLong32(hwnd, index, value.ToInt32()));
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
-    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+    private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
-    private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
@@ -184,6 +249,25 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    internal static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
+    internal static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint message, IntPtr wParam,
+        IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out int value, int size);
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern int GetSystemMetricsForDpi(int index, uint dpi);
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);

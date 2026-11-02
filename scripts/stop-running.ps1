@@ -9,9 +9,6 @@ public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
 [DllImport("user32.dll")]
-public static extern bool IsWindowVisible(IntPtr hWnd);
-
-[DllImport("user32.dll")]
 public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 '@ -Name Native -Namespace OsuCursorStop
 
@@ -29,7 +26,7 @@ foreach ($process in $processes)
         param([IntPtr]$hWnd, [IntPtr]$lParam)
         [uint32]$winPid = 0
         [OsuCursorStop.Native]::GetWindowThreadProcessId($hWnd, [ref]$winPid) | Out-Null
-        if ($winPid -eq $targetPid -and [OsuCursorStop.Native]::IsWindowVisible($hWnd))
+        if ($winPid -eq $targetPid)
         {
             [OsuCursorStop.Native]::PostMessage($hWnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
         }
@@ -38,11 +35,17 @@ foreach ($process in $processes)
     [OsuCursorStop.Native]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
 }
 
-Start-Sleep -Milliseconds 1200
+foreach ($process in $processes)
+{
+    if (-not $process.WaitForExit(5000))
+    {
+        throw "OsuCursorWin did not exit cleanly. Close it from the tray before installing."
+    }
+}
 $remaining = Get-Process OsuCursorWin -ErrorAction SilentlyContinue
 if ($remaining)
 {
-    Write-Host "Some OsuCursorWin processes are still running."
+    throw "An OsuCursorWin process is still running."
 }
 else
 {

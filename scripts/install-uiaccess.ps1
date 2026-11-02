@@ -1,6 +1,6 @@
 param(
-    [string]$ExePath = (Join-Path $PSScriptRoot "..\publish\OsuCursorWin.exe"),
-    [string]$InstallDir = "C:\Program Files\OsuCursorWin"
+    [string]$ExePath = (Join-Path $PSScriptRoot "..\publish-uiaccess\OsuCursorWin.exe"),
+    [string]$InstallDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,13 +13,38 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-& (Join-Path $PSScriptRoot "stop-running.ps1")
-
 $sourceExe = (Resolve-Path -LiteralPath $ExePath).Path
+[xml]$manifest = & (Join-Path $PSScriptRoot "read-manifest.ps1") -ExePath $sourceExe
+$namespaces = [Xml.XmlNamespaceManager]::new($manifest.NameTable)
+$namespaces.AddNamespace('asm1', 'urn:schemas-microsoft-com:asm.v1')
+$namespaces.AddNamespace('asm3', 'urn:schemas-microsoft-com:asm.v3')
+$executionLevel = $manifest.SelectSingleNode('/asm1:assembly/asm3:trustInfo/asm3:security/asm3:requestedPrivileges/asm3:requestedExecutionLevel', $namespaces)
+if ($null -eq $executionLevel -or $executionLevel.GetAttribute('uiAccess') -ne 'true')
+{
+    throw "The executable does not have a valid UIAccess manifest. Build it with scripts\build.ps1 -UiAccess."
+}
+
+$nativeProgramFiles = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion').ProgramW6432Dir
+if ([string]::IsNullOrWhiteSpace($nativeProgramFiles))
+{
+    $nativeProgramFiles = [Environment]::GetFolderPath('ProgramFiles')
+}
+if ([string]::IsNullOrWhiteSpace($InstallDir))
+{
+    $InstallDir = Join-Path $nativeProgramFiles "OsuCursorWin"
+}
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$programFilesRoot = [IO.Path]::GetFullPath($nativeProgramFiles).TrimEnd('\') + '\'
+if (-not $InstallDir.StartsWith($programFilesRoot, [StringComparison]::OrdinalIgnoreCase))
+{
+    throw "UIAccess must be installed under the native Program Files directory: $programFilesRoot."
+}
+
 $certSubject = "CN=Osu Cursor Local"
 $cert = Get-ChildItem "Cert:\CurrentUser\My" |
     Where-Object {
-        $_.Subject -eq $certSubject -and
+        $_.Subject -eq $certSubject -and $_.HasPrivateKey -and
+        $_.NotBefore -le (Get-Date) -and $_.NotAfter -gt (Get-Date) -and
         ($_.EnhancedKeyUsageList.ObjectId -contains "1.3.6.1.5.5.7.3.3")
     } |
     Select-Object -First 1
@@ -53,6 +78,7 @@ if (-not $publisherCert)
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $destExe = Join-Path $InstallDir "OsuCursorWin.exe"
+& (Join-Path $PSScriptRoot "stop-running.ps1")
 Copy-Item -LiteralPath $sourceExe -Destination $destExe -Force
 Set-AuthenticodeSignature -FilePath $destExe -Certificate $cert -HashAlgorithm SHA256 | Out-Null
 

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../OsuCursorWin/TapSoundPlayer.cs" Link="TapSoundPlayer.cs" />
+    <Compile Include="../../OsuCursorWin/PcmSample.cs" Link="PcmSample.cs" />
+    <Compile Include="../../OsuCursorWin/AudioVoice.cs" Link="AudioVoice.cs" />
+    <PackageReference Include="NAudio" Version="2.3.0" />
+  </ItemGroup>
+</Project>

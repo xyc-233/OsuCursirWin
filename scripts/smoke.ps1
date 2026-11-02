@@ -1,29 +1,39 @@
-param([string]$ExePath)
+param([string]$ExePath, [switch]$RequireUiAccess)
 
 $ErrorActionPreference = "Stop"
 
 $log = Join-Path $env:TEMP "OsuCursorWin.log"
-if (Test-Path -LiteralPath $log)
-{
-    Remove-Item -LiteralPath $log -Force
-}
-
 $publishV2Exe = Join-Path $PSScriptRoot "..\publish-v2\OsuCursorWin.exe"
 $publishExe = Join-Path $PSScriptRoot "..\publish\OsuCursorWin.exe"
 $binExe = Join-Path $PSScriptRoot "..\OsuCursorWin\bin\Release\net8.0-windows\OsuCursorWin.exe"
-$exe = if ($ExePath) { $ExePath } elseif (Test-Path -LiteralPath $publishV2Exe) { $publishV2Exe } elseif (Test-Path -LiteralPath $publishExe) { $publishExe } else { $binExe }
-$process = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru
-
-if (-not $process.WaitForExit(10000))
+$exe = if ($ExePath)
 {
-    Write-Host "timed out; stopping"
-    Stop-Process -Id $process.Id -Force
-    Start-Sleep -Milliseconds 300
-    Write-Host "exitCode=$($process.ExitCode)"
+    $ExePath
 }
 else
 {
-    Write-Host "exited exitCode=$($process.ExitCode)"
+    @($publishV2Exe, $publishExe, $binExe) |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Get-Item |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $exe)
+{
+    throw "No build found. Run scripts\build.ps1 first."
+}
+$exe = (Resolve-Path -LiteralPath $exe).Path
+$arguments = @("--smoke")
+if ($RequireUiAccess)
+{
+    $arguments += "--require-uiaccess"
+}
+$process = Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+
+if (-not $process.WaitForExit(10000))
+{
+    Stop-Process -Id $process.Id -Force
+    throw "Smoke test timed out after 10 seconds."
 }
 
 if (Test-Path -LiteralPath $log)
@@ -32,5 +42,12 @@ if (Test-Path -LiteralPath $log)
 }
 else
 {
-    Write-Host "no log"
+    throw "Smoke test did not write a log."
 }
+
+if ($process.ExitCode -ne 0)
+{
+    throw "Smoke test failed with exit code $($process.ExitCode)."
+}
+
+Write-Host "Smoke test passed."
